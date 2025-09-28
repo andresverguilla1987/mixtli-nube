@@ -1,15 +1,16 @@
 {
-  "name": "mixtli-nube-api",
-  "version": "1.0.0",
+  "name": "mixtli-transfer-backend",
+  "private": true,
   "type": "module",
+  "version": "1.0.1",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.689.0",
+    "@aws-sdk/s3-request-presigner": "^3.689.0",
     "cors": "^2.8.5",
     "express": "^4.19.2"
-  },
-  "engines": {
-    "node": ">=18"
   }
 }
