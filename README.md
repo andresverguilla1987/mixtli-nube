@@ -1,8 +1,13 @@
-# Mixtli Transfer — Relay (sin CORS)
-Sube el archivo al backend vía multipart `/api/upload` y el backend lo guarda en S3.
-Evita CORS completamente.
+# Mixtli Transfer (presign sin Content-Type)
+- Evita 403 por mismatch de Content-Type en S3-compatibles.
+- Endpoints:
+  - GET /salud
+  - POST /api/presign  { filename } -> uploadUrl (PUT), downloadUrl (GET)
 
-- `POST /api/upload` (form-data, campo `file`)
-- `GET /salud`
-
-ENV: S3_ENDPOINT, S3_REGION, S3_FORCE_PATH_STYLE, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY
+ENV esperados (IDrive e2):
+S3_ENDPOINT=https://x3j7.or2.idrivee2-60.com
+S3_REGION=or2
+S3_FORCE_PATH_STYLE=true
+S3_BUCKET=1mixtlinube3
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
