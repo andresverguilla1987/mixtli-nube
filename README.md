@@ -1,22 +1,12 @@
-# Mixtli Transfer — Backend (Stripe fail-fast)
+# Mixtli Transfer — Diagnostics Build
 
-## Novedades
-- `REQUIRE_STRIPE=1` → obliga `STRIPE_SECRET_KEY` al arrancar (deploy falla si falta).
-- `GET /api/diag/stripe` → diagnostica presencia y modo (test/live).
+Endpoints útiles:
+- `GET /salud`
+- `GET /api/diag/env` → muestra qué variables S3/Stripe/CORS están presentes (sin revelar secretos).
+- `GET /api/diag/stripe`
+- `GET /api/list-check` → intenta `ListObjectsV2` (debug rápido del bucket).
 
-## Env (Render)
-```
-S3_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com
-S3_REGION=auto
-S3_FORCE_PATH_STYLE=true
-S3_BUCKET=<bucket>
-S3_ACCESS_KEY_ID=<R2 access key>
-S3_SECRET_ACCESS_KEY=<R2 secret>
-ALLOWED_ORIGINS=["https://<tu-netlify>.netlify.app"]
-PORT=10000
-
-# Stripe
-REQUIRE_STRIPE=1
-STRIPE_SECRET_KEY=sk_test_xxx   # o sk_live_xxx
-# STRIPE_WEBHOOK_SECRET=whsec_xxx (opcional si usas webhooks)
-```
+Uso típico en Render:
+1) Subir este ZIP.
+2) Configurar envs S3_* y Stripe si aplica.
+3) Abrir `/api/diag/env` y `/api/list-check` para ubicar el problema exacto.

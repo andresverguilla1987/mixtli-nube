@@ -1,8 +1,8 @@
 {
-  "name": "mixtli-transfer-backend",
+  "name": "mixtli-transfer-backend-diagnostics",
   "private": true,
   "type": "module",
-  "version": "1.0.1",
+  "version": "1.0.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
