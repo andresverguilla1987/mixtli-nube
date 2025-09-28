@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mixtli Relay — Upload Tester</title>
+  <style>
+    body{font-family:system-ui,Arial;margin:2rem;background:#0b0b10;color:#e8e8ef}
+    .card{max-width:720px;background:#141420;border:1px solid #222238;border-radius:16px;padding:20px}
+    input[type="text"]{width:100%;padding:10px;border-radius:10px;border:1px solid #2a2a40;background:#0f0f18;color:#fff}
+    button{padding:10px 16px;border-radius:12px;border:1px solid #2a2a40;background:#1c1c2e;color:#fff;cursor:pointer}
+    pre{background:#0f1320;padding:10px;border-radius:12px;overflow:auto}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Mixtli Relay — Upload Tester</h2>
+    <label>URL del backend (Render):</label>
+    <input id="api" type="text" value="https://mixtli-nube.onrender.com" />
+    <div style="height:12px"></div>
+    <input id="file" type="file" />
+    <button id="send">Subir</button>
+    <div style="height:12px"></div>
+    <pre id="out"></pre>
+  </div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = $("#api"), file = $("#file"), send = $("#send"), out = $("#out");
+
+send.onclick = async () => {
+  try{
+    if(!file.files[0]){ out.textContent = "Elige un archivo."; return; }
+    const fd = new FormData();
+    fd.append("file", file.files[0]);
+    const r = await fetch(api.value.replace(/\/$/,'') + "/api/upload", { method:"POST", body: fd });
+    const txt = await r.text();
+    out.textContent = txt;
+  }catch(e){
+    out.textContent = "Error: " + e.message;
+  }
+};
+</script>
+</body>
+</html>
