@@ -1,12 +1,13 @@
-# Mixtli Transfer — Diagnostics Build
+# Mixtli Transfer (presign sin Content-Type)
+- Evita 403 por mismatch de Content-Type en S3-compatibles.
+- Endpoints:
+  - GET /salud
+  - POST /api/presign  { filename } -> uploadUrl (PUT), downloadUrl (GET)
 
-Endpoints útiles:
-- `GET /salud`
-- `GET /api/diag/env` → muestra qué variables S3/Stripe/CORS están presentes (sin revelar secretos).
-- `GET /api/diag/stripe`
-- `GET /api/list-check` → intenta `ListObjectsV2` (debug rápido del bucket).
-
-Uso típico en Render:
-1) Subir este ZIP.
-2) Configurar envs S3_* y Stripe si aplica.
-3) Abrir `/api/diag/env` y `/api/list-check` para ubicar el problema exacto.
+ENV esperados (IDrive e2):
+S3_ENDPOINT=https://x3j7.or2.idrivee2-60.com
+S3_REGION=or2
+S3_FORCE_PATH_STYLE=true
+S3_BUCKET=1mixtlinube3
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
