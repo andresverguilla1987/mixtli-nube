@@ -1,9 +1,8 @@
 {
-  "name": "mixtli-transfer-backend-relay-diag",
+  "name": "mixtli-relay-pack",
   "private": true,
   "type": "module",
   "version": "1.0.0",
-  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },

@@ -1,13 +1,14 @@
-# Mixtli Transfer (presign sin Content-Type)
-- Evita 403 por mismatch de Content-Type en S3-compatibles.
-- Endpoints:
-  - GET /salud
-  - POST /api/presign  { filename } -> uploadUrl (PUT), downloadUrl (GET)
+# Mixtli Relay Pack
+Backend relay (sin CORS) + tester HTML.
 
-ENV esperados (IDrive e2):
+Deploy en Render:
+- Build: npm install
+- Start: node server.js
+
+ENV:
 S3_ENDPOINT=https://x3j7.or2.idrivee2-60.com
-S3_REGION=or2
-S3_FORCE_PATH_STYLE=true
-S3_BUCKET=1mixtlinube3
-S3_ACCESS_KEY_ID=...
-S3_SECRET_ACCESS_KEY=...
+S3_REGION=us-east-1
+S3_FORCE_PATH_STYLE=false
+S3_BUCKET=<tu-bucket>
+S3_ACCESS_KEY_ID=<tu-access-key>
+S3_SECRET_ACCESS_KEY=<tu-secret>
