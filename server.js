@@ -9,13 +9,13 @@ const Busboy = require('busboy');
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
-// CORS (del servidor) para permitir tu Netlify / localhost
+// ---- CORS del servidor (no del bucket) ----
 const allowed = process.env.ALLOWED_ORIGINS
   ? (process.env.ALLOWED_ORIGINS.includes('[') ? JSON.parse(process.env.ALLOWED_ORIGINS) : process.env.ALLOWED_ORIGINS.split(',').map(s=>s.trim()))
   : ['http://localhost:3000','http://localhost:8888'];
-app.use(cors({ origin: allowed, credentials: false }));
+app.use(cors({ origin: allowed }));
 
-// SDK S3 (IDrive e2)
+// ---- S3 Client (IDrive e2 compatible) ----
 const s3 = new S3Client({
   endpoint: process.env.S3_ENDPOINT,
   region: process.env.S3_REGION || 'us-east-1',
@@ -27,17 +27,25 @@ const s3 = new S3Client({
 });
 const BUCKET = process.env.S3_BUCKET;
 
-// ---------- util ----------
-const ok = (res, data={}) => res.json({ ok: true, ...data });
-const boom = (res, code, e) => res.status(code).json({ ok:false, name:e.name, message:e.message });
+// ---- helpers seguros ----
+function sendOk(res, data = {}) {
+  if (res.headersSent) return;
+  res.json({ ok: true, ...data });
+}
+function sendErr(res, code, e) {
+  if (res.headersSent) return;
+  const body = e && e.name
+    ? { ok:false, name:e.name, message:e.message }
+    : { ok:false, error:String(e||'error') };
+  res.status(code).json(body);
+}
 
-// ---------- health ----------
-app.get(['/','/salud','/api/health'], (_req,res)=> ok(res, { service: 'Mixtli Relay', t: Date.now() }));
+// ---- health ----
+app.get(['/','/salud','/api/health'], (_req,res)=> sendOk(res, { service: 'Mixtli Relay', t: Date.now() }));
 
-// ---------- diag ----------
+// ---- diag ----
 app.get(['/diag','/api/diag'], (_req,res)=> {
-  res.json({
-    ok:true,
+  sendOk(res, {
     s3: {
       endpoint: process.env.S3_ENDPOINT,
       bucket: BUCKET,
@@ -50,21 +58,21 @@ app.get(['/diag','/api/diag'], (_req,res)=> {
   });
 });
 
-// ---------- check bucket ----------
+// ---- check bucket ----
 app.get(['/check-bucket','/api/check-bucket'], async (_req,res) => {
   try {
     await s3.send(new HeadBucketCommand({ Bucket: BUCKET }));
-    ok(res, { bucketExists: true });
+    sendOk(res, { bucketExists: true });
   } catch(e) {
-    boom(res, 500, e);
+    sendErr(res, 500, e);
   }
 });
 
-// ---------- presign PUT (opcional, por si quieres mantenerlo) ----------
+// ---- presign PUT (opcional) ----
 app.post(['/presign','/api/presign'], async (req,res) => {
   try{
     const { filename, contentType, bytes } = req.body || {};
-    if(!filename) return res.status(400).json({ ok:false, error:'Missing filename' });
+    if(!filename) return sendErr(res, 400, { name:'BadRequest', message:'Missing filename' });
     const safe = String(filename).replace(/[^a-zA-Z0-9._-]/g,'_');
     const key = `uploads/${Date.now()}_${safe}`;
     const cmd = new PutObjectCommand({
@@ -73,66 +81,70 @@ app.post(['/presign','/api/presign'], async (req,res) => {
       ContentLength: bytes || undefined
     });
     const url = await getSignedUrl(s3, cmd, { expiresIn: 900 });
-    ok(res, { url, key });
-  }catch(e){ boom(res, 500, e); }
+    sendOk(res, { url, key });
+  }catch(e){ sendErr(res, 500, e); }
 });
 
-// ---------- upload via server (no CORS en bucket) ----------
+// ---- upload via server (streaming; evita CORS de bucket) ----
 app.post(['/upload','/api/upload'], (req, res) => {
-  const bb = Busboy({ headers: req.headers, limits: { files: 1, fileSize: 10 * 1024 * 1024 * 1024 } }); // 10GB
-  let settled = false;
+  const bb = Busboy({ headers: req.headers, limits: { files: 1, fileSize: 10 * 1024 * 1024 * 1024 } }); // 10 GB
+  let responded = false;
+
+  function respondOnce(fn){
+    if (responded) return true;
+    responded = true;
+    fn();
+    return false;
+  }
 
   bb.on('file', async (_name, file, info) => {
     const { filename, mimeType } = info;
     const safe = String(filename || 'file.bin').replace(/[^a-zA-Z0-9._-]/g,'_');
     const key = `uploads/${Date.now()}_${safe}`;
 
-    try{
+    try {
       const uploader = new Upload({
         client: s3,
-        params: {
-          Bucket: BUCKET,
-          Key: key,
-          Body: file,
-          ContentType: mimeType || 'application/octet-stream'
-        },
+        params: { Bucket: BUCKET, Key: key, Body: file, ContentType: mimeType || 'application/octet-stream' },
         queueSize: 4,
         partSize: 8 * 1024 * 1024
       });
       await uploader.done();
-      settled = true;
-      ok(res, { key });
-    }catch(e){
-      settled = true;
-      boom(res, 500, e);
+      if (respondOnce(()=> sendOk(res, { key }))) return;
+    } catch (e) {
+      if (respondOnce(()=> sendErr(res, 500, e))) return;
     }
   });
 
   bb.on('error', (err)=>{
-    if (settled) return;
-    settled = true;
-    res.status(400).json({ ok:false, error:'bad form-data', detail: err.message });
+    if (responded) return;
+    responded = true;
+    sendErr(res, 400, { name:'BadFormData', message: err.message });
   });
+
   bb.on('finish', ()=>{
-    if (!settled) {
-      settled = true;
-      res.status(400).json({ ok:false, error:'no file' });
-    }
+    if (responded) return;
+    responded = true;
+    sendErr(res, 400, { name:'NoFile', message:'no file' });
+  });
+
+  req.on('aborted', ()=>{
+    if (responded) return;
+    responded = true; // cliente canceló; no respondemos
   });
 
   req.pipe(bb);
 });
 
-// ---------- presign GET (descarga privada) ----------
+// ---- presign GET ----
 app.post(['/presign-get','/api/presign-get'], async (req,res) => {
   try{
     const { key } = req.body || {};
-    if(!key) return res.status(400).json({ ok:false, error:'Missing key' });
+    if(!key) return sendErr(res, 400, { name:'BadRequest', message:'Missing key' });
     const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn: 900 });
-    ok(res, { url, expiresIn: 900 });
-  }catch(e){ boom(res, 500, e); }
+    sendOk(res, { url, expiresIn: 900 });
+  }catch(e){ sendErr(res, 500, e); }
 });
 
-// ---------- start ----------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, ()=> console.log('Mixtli Relay on', PORT));
