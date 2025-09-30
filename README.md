@@ -1,8 +1,8 @@
 
-# Mixtli Relay Upload (Thumbnails Reales)
-- Genera miniaturas al subir imágenes con Sharp (480x320, JPG).
-- Guarda original en `albums/<album>/...` y thumb en `thumbs/<key>.jpg`.
-- Lista de items incluye `thumb`.
-- `/api/presign-batch` te firma en lote cualquier key (original o thumb).
+# Mixtli Relay Upload (Admin: Delete/Rename + Trash)
+Endpoints:
+- POST /api/delete { key } [X-Admin-Token] → Mueve a trash/ y borra original (+ thumb si hay).
+- POST /api/rename { key, newName } [X-Admin-Token] → Renombra (copy+delete) y mueve thumb.
+- Admin token: setear env `ADMIN_TOKEN=loquesea`. Si se omite, no se exige token.
 
-**Requisitos Render**: `npm install` descarga Sharp prebuild (x64). Si falla, Render recompila.
+Requiere los envs S3_* habituales y ALLOWED_ORIGINS.

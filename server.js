@@ -3,10 +3,9 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('node:path');
-const sharp = require('sharp');
 const {
   S3Client, HeadBucketCommand, PutObjectCommand, GetObjectCommand,
-  ListObjectsV2Command
+  ListObjectsV2Command, CopyObjectCommand, DeleteObjectCommand
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { Upload } = require('@aws-sdk/lib-storage');
@@ -14,7 +13,6 @@ const { Upload } = require('@aws-sdk/lib-storage');
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
-// ---- Defensive ALLOWED_ORIGINS parsing ----
 function parseAllowedOrigins(raw) {
   if (!raw) return ['http://localhost:3000','http://localhost:8888'];
   const cleaned = String(raw).replace(/^ALLOWED_ORIGINS\s*=/i, '').trim();
@@ -31,7 +29,6 @@ function parseAllowedOrigins(raw) {
 const allowed = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
 app.use(cors({ origin: allowed }));
 
-// ---- S3 Client ----
 const s3 = new S3Client({
   endpoint: process.env.S3_ENDPOINT,
   region: process.env.S3_REGION || 'us-east-1',
@@ -43,7 +40,6 @@ const s3 = new S3Client({
 });
 const BUCKET = process.env.S3_BUCKET;
 
-// ---- helpers ----
 function sendOk(res, data = {}) { if (!res.headersSent) res.json({ ok: true, ...data }); }
 function sendErr(res, code, e) {
   if (res.headersSent) return;
@@ -53,10 +49,9 @@ function sendErr(res, code, e) {
 const slug = (s)=> String(s||'').normalize('NFKD').replace(/[^\w\s.-]/g,'').trim().replace(/\s+/g,'-').toLowerCase().slice(0,80);
 const safeName = (n)=> String(n||'file.bin').replace(/[^a-zA-Z0-9._-]/g,'_');
 
-// ---- health ----
 app.get(['/','/salud','/api/health'], (_req,res)=> sendOk(res, { service: 'Mixtli Relay', allowed, t: Date.now() }));
 
-// ---- presign GET / batch ----
+// presign
 app.post(['/presign-get','/api/presign-get'], async (req,res) => {
   try{
     const { key, expiresIn=900 } = req.body || {};
@@ -77,8 +72,8 @@ app.post(['/presign-batch','/api/presign-batch'], async (req,res) => {
   }catch(e){ sendErr(res, 500, e); }
 });
 
-// ---- upload (multer) + thumbnail generation ----
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 * 1024 } }); // 10GB
+// upload
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 * 1024 } });
 app.post(['/upload','/api/upload'], upload.single('file'), async (req, res) => {
   try{
     if (!req.file) return sendErr(res, 400, { name:'NoFile', message:'no file' });
@@ -87,34 +82,17 @@ app.post(['/upload','/api/upload'], upload.single('file'), async (req, res) => {
     const fname = safeName(req.file.originalname);
     const key = `${base}/${Date.now()}_${fname}`;
 
-    // Upload original
     const uploader = new Upload({
       client: s3,
       params: { Bucket: BUCKET, Key: key, Body: req.file.buffer, ContentType: req.file.mimetype || 'application/octet-stream' },
       queueSize: 4, partSize: 8 * 1024 * 1024
     });
     await uploader.done();
-
-    // If image, generate thumbnail to thumbs/<key>.jpg
-    const isImg = /image\/(png|jpe?g|webp|gif|avif)/i.test(req.file.mimetype || '');
-    let thumbKey = null;
-    if (isImg) {
-      try{
-        const tbuf = await sharp(req.file.buffer).rotate().resize({ width: 480, height: 320, fit: 'cover' }).jpeg({ quality: 78 }).toBuffer();
-        thumbKey = `thumbs/${key}.jpg`;
-        await s3.send(new PutObjectCommand({
-          Bucket: BUCKET, Key: thumbKey, Body: tbuf, ContentType: 'image/jpeg'
-        }));
-      }catch(thErr){
-        console.warn('thumb failed:', thErr?.message || thErr);
-      }
-    }
-
-    sendOk(res, { key, thumbKey });
+    sendOk(res, { key });
   }catch(e){ sendErr(res, 500, e); }
 });
 
-// ---- list albums ----
+// list albums
 app.get(['/albums','/api/albums'], async (req,res) => {
   try{
     const Prefix = 'albums/'; const Delimiter = '/';
@@ -125,7 +103,7 @@ app.get(['/albums','/api/albums'], async (req,res) => {
   }catch(e){ sendErr(res, 500, e); }
 });
 
-// ---- list items (excluye manifest) ----
+// list items
 app.get(['/list','/api/list'], async (req,res) => {
   try{
     const album = slug(req.query.album || '');
@@ -142,45 +120,63 @@ app.get(['/list','/api/list'], async (req,res) => {
         key: o.Key,
         size: o.Size,
         lastModified: o.LastModified ? o.LastModified.toISOString() : null,
-        ext: path.extname(o.Key||'').slice(1).toLowerCase(),
-        thumb: `thumbs/${o.Key}.jpg`
+        ext: path.extname(o.Key||'').slice(1).toLowerCase()
       }));
     sendOk(res, { items, nextToken: r.IsTruncated ? r.NextContinuationToken : null, prefix });
   }catch(e){ sendErr(res, 500, e); }
 });
 
-// ---- album manifest (favorites) ----
-async function getManifest(album){
-  const mkey = `albums/${album}/manifest.json`;
-  try {
-    const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: mkey }));
-    const buf = await obj.Body.transformToByteArray();
-    const txt = Buffer.from(buf).toString('utf8');
-    const json = JSON.parse(txt);
-    return { key: mkey, json: json && typeof json==='object' ? json : {} };
-  } catch (e) {
-    return { key: mkey, json: {} };
-  }
+// --- Admin middleware ---
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+function requireAdmin(req,res,next){
+  const t = req.header('X-Admin-Token') || req.query.adminToken;
+  if(!ADMIN_TOKEN || t === ADMIN_TOKEN) return next();
+  return sendErr(res, 401, { name:'Unauthorized', message:'Bad or missing admin token' });
 }
-app.get(['/album-manifest','/api/album-manifest'], async (req,res) => {
+
+// delete -> move to trash/ + delete original thumb if exists
+app.post(['/delete','/api/delete'], requireAdmin, async (req,res)=>{
   try{
-    const album = slug(req.query.album || '');
-    if(!album) return sendErr(res, 400, { name:'BadRequest', message:'Missing album' });
-    const m = await getManifest(album);
-    sendOk(res, { key: m.key, manifest: m.json });
+    const { key } = req.body || {};
+    if(!key) return sendErr(res, 400, { name:'BadRequest', message:'Missing key' });
+    const trashKey = `trash/${Date.now()}_${key.replace(/^albums\//,'').replace(/^uploads\//,'')}`;
+
+    // copy to trash
+    await s3.send(new CopyObjectCommand({ Bucket: BUCKET, CopySource: `/${BUCKET}/${encodeURIComponent(key).replace(/%2F/g,'/')}`, Key: trashKey }));
+    // delete original
+    await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+    // delete thumb if exists (best-effort)
+    const tkey = `thumbs/${key}.jpg`;
+    try{ await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: tkey })); } catch(_){}
+
+    sendOk(res, { trashed: trashKey });
   }catch(e){ sendErr(res, 500, e); }
 });
-app.post(['/album-manifest','/api/album-manifest'], async (req,res) => {
+
+// rename -> copy to new key + delete old + move thumb
+app.post(['/rename','/api/rename'], requireAdmin, async (req,res)=>{
   try{
-    const album = slug(req.body?.album || '');
-    const favorites = Array.isArray(req.body?.favorites) ? req.body.favorites : [];
-    if(!album) return sendErr(res, 400, { name:'BadRequest', message:'Missing album' });
-    const mkey = `albums/${album}/manifest.json`;
-    const body = Buffer.from(JSON.stringify({ favorites }, null, 2));
-    await s3.send(new PutObjectCommand({
-      Bucket: BUCKET, Key: mkey, Body: body, ContentType: 'application/json; charset=utf-8'
-    }));
-    sendOk(res, { key: mkey, favorites });
+    const { key, newName } = req.body || {};
+    if(!key || !newName) return sendErr(res, 400, { name:'BadRequest', message:'Missing key/newName' });
+    const base = key.split('/').slice(0,-1).join('/');
+    const ext = path.extname(key);
+    const clean = newName.endsWith(ext) ? newName : (newName + ext);
+    const newKey = `${base}/${clean}`;
+
+    if(newKey === key) return sendOk(res, { key });
+
+    await s3.send(new CopyObjectCommand({ Bucket: BUCKET, CopySource: `/${BUCKET}/${encodeURIComponent(key).replace(/%2F/g,'/')}`, Key: newKey }));
+    await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+
+    // move thumb if exists
+    const oldThumb = `thumbs/${key}.jpg`;
+    const newThumb = `thumbs/${newKey}.jpg`;
+    try{
+      await s3.send(new CopyObjectCommand({ Bucket: BUCKET, CopySource: `/${BUCKET}/${encodeURIComponent(oldThumb).replace(/%2F/g,'/')}`, Key: newThumb }));
+      await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: oldThumb }));
+    } catch(_){}
+
+    sendOk(res, { key: newKey });
   }catch(e){ sendErr(res, 500, e); }
 });
 
