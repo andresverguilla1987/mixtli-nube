@@ -1,18 +1,13 @@
 {
-  "name": "mixtli-relay-idrivee2",
+  "name": "mixtli-cors-setter",
   "version": "1.0.0",
-  "description": "Minimal Mixtli Relay for Render with IDrive e2 (S3-compatible) presign endpoint",
-  "main": "server.js",
+  "description": "One-shot tool to set CORS on an S3-compatible bucket (IDrive e2/R2/S3) for Mixtli Nube.",
   "type": "commonjs",
+  "main": "set-cors.js",
   "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18"
+    "start": "node set-cors.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "@aws-sdk/client-s3": "^3.645.0",
-    "@aws-sdk/s3-request-presigner": "^3.645.0"
+    "@aws-sdk/client-s3": "^3.645.0"
   }
 }
