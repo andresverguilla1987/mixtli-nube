@@ -49,9 +49,7 @@ function sendErr(res, code, e) {
   const body = e && e.name ? { ok:false, name:e.name, message:e.message } : { ok:false, error:String(e||'error') };
   res.status(code).json(body);
 }
-const slug = (s)=> String(s||'').normalize('NFKD')
-                  .replace(/[^\w\s.-]/g,'').trim()
-                  .replace(/\s+/g,'-').toLowerCase().slice(0,80);
+const slug = (s)=> String(s||'').normalize('NFKD').replace(/[^\w\s.-]/g,'').trim().replace(/\s+/g,'-').toLowerCase().slice(0,80);
 const safeName = (n)=> String(n||'file.bin').replace(/[^a-zA-Z0-9._-]/g,'_');
 
 // ---- health/diag ----
@@ -67,12 +65,8 @@ app.get(['/diag','/api/diag'], (_req,res)=> sendOk(res, {
   },
   cors: { allowed }
 }));
-app.get(['/check-bucket','/api/check-bucket'], async (_req,res) => {
-  try { await s3.send(new HeadBucketCommand({ Bucket: BUCKET })); sendOk(res, { bucketExists: true }); }
-  catch(e){ sendErr(res, 500, e); }
-});
 
-// ---- presign GET ----
+// ---- presign GET / batch ----
 app.post(['/presign-get','/api/presign-get'], async (req,res) => {
   try{
     const { key, expiresIn=900 } = req.body || {};
@@ -81,8 +75,6 @@ app.post(['/presign-get','/api/presign-get'], async (req,res) => {
     sendOk(res, { url, expiresIn });
   }catch(e){ sendErr(res, 500, e); }
 });
-
-// ---- presign batch ----
 app.post(['/presign-batch','/api/presign-batch'], async (req,res) => {
   try{
     const { keys, expiresIn=900 } = req.body || {};
@@ -115,7 +107,7 @@ app.post(['/upload','/api/upload'], upload.single('file'), async (req, res) => {
   }catch(e){ sendErr(res, 500, e); }
 });
 
-// ---- list albums (CommonPrefixes) ----
+// ---- list albums ----
 app.get(['/albums','/api/albums'], async (req,res) => {
   try{
     const Prefix = 'albums/';
@@ -138,7 +130,7 @@ app.get(['/list','/api/list'], async (req,res) => {
     const cmd = new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, MaxKeys: max, ContinuationToken: token });
     const r = await s3.send(cmd);
     const items = (r.Contents || [])
-      .filter(o=>o.Key !== prefix)
+      .filter(o=>o.Key !== prefix && !o.Key.endsWith('/manifest.json'))
       .sort((a,b)=> (b.LastModified?.getTime()||0) - (a.LastModified?.getTime()||0))
       .map(o => ({
         key: o.Key,
@@ -147,6 +139,43 @@ app.get(['/list','/api/list'], async (req,res) => {
         ext: path.extname(o.Key||'').slice(1).toLowerCase()
       }));
     sendOk(res, { items, nextToken: r.IsTruncated ? r.NextContinuationToken : null, prefix });
+  }catch(e){ sendErr(res, 500, e); }
+});
+
+// ---- album manifest (favorites) ----
+async function getManifest(album){
+  const mkey = `albums/${album}/manifest.json`;
+  try {
+    const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: mkey }));
+    const buf = await obj.Body.transformToByteArray();
+    const txt = Buffer.from(buf).toString('utf8');
+    const json = JSON.parse(txt);
+    return { key: mkey, json: json && typeof json==='object' ? json : {} };
+  } catch (e) {
+    return { key: mkey, json: {} }; // not found or parse error
+  }
+}
+
+app.get(['/album-manifest','/api/album-manifest'], async (req,res) => {
+  try{
+    const album = slug(req.query.album || '');
+    if(!album) return sendErr(res, 400, { name:'BadRequest', message:'Missing album' });
+    const m = await getManifest(album);
+    sendOk(res, { key: m.key, manifest: m.json });
+  }catch(e){ sendErr(res, 500, e); }
+});
+
+app.post(['/album-manifest','/api/album-manifest'], async (req,res) => {
+  try{
+    const album = slug(req.body?.album || '');
+    const favorites = Array.isArray(req.body?.favorites) ? req.body.favorites : [];
+    if(!album) return sendErr(res, 400, { name:'BadRequest', message:'Missing album' });
+    const mkey = `albums/${album}/manifest.json`;
+    const body = Buffer.from(JSON.stringify({ favorites }, null, 2));
+    await s3.send(new PutObjectCommand({
+      Bucket: BUCKET, Key: mkey, Body: body, ContentType: 'application/json; charset=utf-8'
+    }));
+    sendOk(res, { key: mkey, favorites });
   }catch(e){ sendErr(res, 500, e); }
 });
 
