@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('node:path');
+const sharp = require('sharp');
 const {
   S3Client, HeadBucketCommand, PutObjectCommand, GetObjectCommand,
   ListObjectsV2Command
@@ -52,19 +53,8 @@ function sendErr(res, code, e) {
 const slug = (s)=> String(s||'').normalize('NFKD').replace(/[^\w\s.-]/g,'').trim().replace(/\s+/g,'-').toLowerCase().slice(0,80);
 const safeName = (n)=> String(n||'file.bin').replace(/[^a-zA-Z0-9._-]/g,'_');
 
-// ---- health/diag ----
+// ---- health ----
 app.get(['/','/salud','/api/health'], (_req,res)=> sendOk(res, { service: 'Mixtli Relay', allowed, t: Date.now() }));
-app.get(['/diag','/api/diag'], (_req,res)=> sendOk(res, {
-  s3: {
-    endpoint: process.env.S3_ENDPOINT,
-    bucket: BUCKET,
-    region: process.env.S3_REGION || 'us-east-1',
-    forcePathStyle: String(process.env.S3_FORCE_PATH_STYLE || 'true') === 'true',
-    hasKey: !!process.env.S3_ACCESS_KEY_ID,
-    hasSecret: !!process.env.S3_SECRET_ACCESS_KEY
-  },
-  cors: { allowed }
-}));
 
 // ---- presign GET / batch ----
 app.post(['/presign-get','/api/presign-get'], async (req,res) => {
@@ -87,7 +77,7 @@ app.post(['/presign-batch','/api/presign-batch'], async (req,res) => {
   }catch(e){ sendErr(res, 500, e); }
 });
 
-// ---- upload (multer) admite album ----
+// ---- upload (multer) + thumbnail generation ----
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 * 1024 } }); // 10GB
 app.post(['/upload','/api/upload'], upload.single('file'), async (req, res) => {
   try{
@@ -97,21 +87,37 @@ app.post(['/upload','/api/upload'], upload.single('file'), async (req, res) => {
     const fname = safeName(req.file.originalname);
     const key = `${base}/${Date.now()}_${fname}`;
 
+    // Upload original
     const uploader = new Upload({
       client: s3,
       params: { Bucket: BUCKET, Key: key, Body: req.file.buffer, ContentType: req.file.mimetype || 'application/octet-stream' },
       queueSize: 4, partSize: 8 * 1024 * 1024
     });
     await uploader.done();
-    sendOk(res, { key });
+
+    // If image, generate thumbnail to thumbs/<key>.jpg
+    const isImg = /image\/(png|jpe?g|webp|gif|avif)/i.test(req.file.mimetype || '');
+    let thumbKey = null;
+    if (isImg) {
+      try{
+        const tbuf = await sharp(req.file.buffer).rotate().resize({ width: 480, height: 320, fit: 'cover' }).jpeg({ quality: 78 }).toBuffer();
+        thumbKey = `thumbs/${key}.jpg`;
+        await s3.send(new PutObjectCommand({
+          Bucket: BUCKET, Key: thumbKey, Body: tbuf, ContentType: 'image/jpeg'
+        }));
+      }catch(thErr){
+        console.warn('thumb failed:', thErr?.message || thErr);
+      }
+    }
+
+    sendOk(res, { key, thumbKey });
   }catch(e){ sendErr(res, 500, e); }
 });
 
 // ---- list albums ----
 app.get(['/albums','/api/albums'], async (req,res) => {
   try{
-    const Prefix = 'albums/';
-    const Delimiter = '/';
+    const Prefix = 'albums/'; const Delimiter = '/';
     const cmd = new ListObjectsV2Command({ Bucket: BUCKET, Prefix, Delimiter, MaxKeys: 1000 });
     const resp = await s3.send(cmd);
     const out = (resp.CommonPrefixes || []).map(p => (p.Prefix||'').slice(Prefix.length, -1)).filter(Boolean);
@@ -119,7 +125,7 @@ app.get(['/albums','/api/albums'], async (req,res) => {
   }catch(e){ sendErr(res, 500, e); }
 });
 
-// ---- list items in album ----
+// ---- list items (excluye manifest) ----
 app.get(['/list','/api/list'], async (req,res) => {
   try{
     const album = slug(req.query.album || '');
@@ -136,7 +142,8 @@ app.get(['/list','/api/list'], async (req,res) => {
         key: o.Key,
         size: o.Size,
         lastModified: o.LastModified ? o.LastModified.toISOString() : null,
-        ext: path.extname(o.Key||'').slice(1).toLowerCase()
+        ext: path.extname(o.Key||'').slice(1).toLowerCase(),
+        thumb: `thumbs/${o.Key}.jpg`
       }));
     sendOk(res, { items, nextToken: r.IsTruncated ? r.NextContinuationToken : null, prefix });
   }catch(e){ sendErr(res, 500, e); }
@@ -152,10 +159,9 @@ async function getManifest(album){
     const json = JSON.parse(txt);
     return { key: mkey, json: json && typeof json==='object' ? json : {} };
   } catch (e) {
-    return { key: mkey, json: {} }; // not found or parse error
+    return { key: mkey, json: {} };
   }
 }
-
 app.get(['/album-manifest','/api/album-manifest'], async (req,res) => {
   try{
     const album = slug(req.query.album || '');
@@ -164,7 +170,6 @@ app.get(['/album-manifest','/api/album-manifest'], async (req,res) => {
     sendOk(res, { key: m.key, manifest: m.json });
   }catch(e){ sendErr(res, 500, e); }
 });
-
 app.post(['/album-manifest','/api/album-manifest'], async (req,res) => {
   try{
     const album = slug(req.body?.album || '');

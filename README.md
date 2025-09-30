@@ -1,10 +1,8 @@
 
-# Mixtli Relay Upload (Álbumes + Favoritos + Lightbox-ready)
-Endpoints:
-- POST /api/upload (file, album?) → guarda en albums/<album>/ o uploads/
-- GET  /api/albums → lista álbumes
-- GET  /api/list?album=... → lista items (excluye manifest.json)
-- POST /api/presign-get { key } → URL firmada (15m por default)
-- POST /api/presign-batch { keys:[...] } → URLs firmadas en lote
-- GET  /api/album-manifest?album=... → obtiene manifest.json (favorites)
-- POST /api/album-manifest { album, favorites:[keys] } → guarda manifest.json
+# Mixtli Relay Upload (Thumbnails Reales)
+- Genera miniaturas al subir imágenes con Sharp (480x320, JPG).
+- Guarda original en `albums/<album>/...` y thumb en `thumbs/<key>.jpg`.
+- Lista de items incluye `thumb`.
+- `/api/presign-batch` te firma en lote cualquier key (original o thumb).
+
+**Requisitos Render**: `npm install` descarga Sharp prebuild (x64). Si falla, Render recompila.
