@@ -1,16 +1,18 @@
 {
-  "name": "mixtli-relay-pack",
-  "private": true,
-  "type": "module",
+  "name": "mixtli-relay-idrivee2",
   "version": "1.0.0",
+  "description": "Minimal Mixtli Relay for Render with IDrive e2 (S3-compatible) presign endpoint",
+  "main": "server.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.689.0",
-    "@aws-sdk/s3-request-presigner": "^3.689.0",
-    "cors": "^2.8.5",
     "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1"
+    "@aws-sdk/client-s3": "^3.645.0",
+    "@aws-sdk/s3-request-presigner": "^3.645.0"
   }
 }

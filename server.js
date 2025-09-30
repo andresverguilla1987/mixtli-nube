@@ -1,51 +1,100 @@
-import express from "express";
-import cors from "cors";
-import multer from "multer";
-import crypto from "crypto";
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-
+const express = require('express');
 const app = express();
-app.use(cors({ origin: true, credentials: true }));
+app.use(express.json());
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024*1024*1024 } });
-const PORT = process.env.PORT ? Number(process.env.PORT) : 10000;
+// ---- Basic CORS (restrict to your Netlify) ----
+const ALLOWED = (process.env.ALLOWED_ORIGINS || '["https://lovely-bienenstitch-6344a1.netlify.app"]').split(',').map(s => s.trim()).map(s => {
+  try { return JSON.parse(s); } catch { return s; }
+}).flat(); // allow passing as JSON array or comma-separated
 
-function rid(n=8){ return crypto.randomBytes(n).toString("hex"); }
-
-function mkClient(){
-  const endpoint = process.env.S3_ENDPOINT;
-  const region = process.env.S3_REGION || "us-east-1";
-  const forcePathStyle = String(process.env.S3_FORCE_PATH_STYLE || "false") === "true";
-  const accessKeyId = process.env.S3_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
-  if(!endpoint || !accessKeyId || !secretAccessKey || !process.env.S3_BUCKET){
-    throw new Error("Missing S3 env vars");
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && (ALLOWED.includes(origin) || ALLOWED.includes("*"))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
   }
-  return new S3Client({
-    endpoint, region, forcePathStyle,
-    credentials: { accessKeyId, secretAccessKey }
-  });
-}
-
-app.get("/salud",(req,res)=>{ res.json({ ok:true, relay:true, now:new Date().toISOString() }); });
-
-app.post("/api/upload", upload.single("file"), async (req,res)=>{
-  try{
-    if(!req.file) return res.status(400).json({ ok:false, error:"missing file field" });
-    const client = mkClient();
-    const bucket = process.env.S3_BUCKET;
-    const now = new Date();
-    const folder = `${now.getUTCFullYear()}-${String(now.getUTCMonth()+1).padStart(2,"0")}-${String(now.getUTCDate()).padStart(2,"0")}`;
-    const key = `uploads/${folder}/${rid(6)}-${req.file.originalname}`;
-    await client.send(new PutObjectCommand({
-      Bucket: bucket, Key: key, Body: req.file.buffer,
-      ContentType: req.file.mimetype || "application/octet-stream"
-    }));
-    const get = new GetObjectCommand({ Bucket: bucket, Key: key });
-    const downloadUrl = await getSignedUrl(client, get, { expiresIn: 7*24*3600 });
-    res.json({ ok:true, key, size:req.file.size, contentType:req.file.mimetype, downloadUrl });
-  }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,HEAD,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'content-type,x-mixtli-token');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
 });
 
-app.listen(PORT, ()=>console.log("Mixtli Relay on", PORT));
+// ---- Health endpoints ----
+app.get('/salud', (_req, res) => res.status(200).json({ ok: true, service: 'mixtli-relay', now: new Date().toISOString() }));
+app.get(['/health','/api/health'], (_req, res) => res.status(200).json({ ok: true, service: 'mixtli-relay', now: new Date().toISOString() }));
+
+// ---- S3 Client (IDrive e2 / S3 compatible) ----
+const { S3Client, HeadBucketCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+
+const S3_ENDPOINT = process.env.S3_ENDPOINT;              // e.g. https://x3j7.or2.idrivee2-60.com
+const S3_REGION = process.env.S3_REGION || 'us-east-1';   // IDrive e2 commonly uses us-east-1 for SDK
+const S3_BUCKET = process.env.S3_BUCKET;                  // e.g. 1mixtlinube3
+const FORCE_PATH = String(process.env.S3_FORCE_PATH_STYLE || 'true') === 'true';
+
+const s3 = new S3Client({
+  endpoint: S3_ENDPOINT,
+  region: S3_REGION,
+  forcePathStyle: FORCE_PATH,
+  credentials: {
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY
+  }
+});
+
+// ---- Diagnostics ----
+app.get('/api/diag', (_req, res) => {
+  res.json({
+    ok: true,
+    s3: {
+      endpoint: S3_ENDPOINT,
+      bucket: S3_BUCKET,
+      region: S3_REGION,
+      forcePathStyle: FORCE_PATH,
+      hasKey: !!process.env.S3_ACCESS_KEY_ID,
+      hasSecret: !!process.env.S3_SECRET_ACCESS_KEY
+    },
+    cors: { allowed: ALLOWED }
+  });
+});
+
+app.get('/api/check-bucket', async (_req, res) => {
+  try {
+    await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }));
+    res.json({ ok: true, bucketExists: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.name, message: e.message });
+  }
+});
+
+// ---- Presign PUT for uploads ----
+// POST /api/presign  { filename, contentType, bytes }
+app.post(['/presign','/api/presign'], async (req, res) => {
+  try {
+    const { filename, contentType, bytes } = req.body || {};
+    if (!filename || !contentType) {
+      return res.status(400).json({ ok: false, error: 'Missing filename/contentType' });
+    }
+    const safeName = String(filename).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const key = `uploads/${Date.now()}_${safeName}`;
+    const cmd = new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      ContentType: contentType,
+      ...(bytes ? { ContentLength: bytes } : {}),
+    });
+    const url = await getSignedUrl(s3, cmd, { expiresIn: 900 }); // 15 min
+    res.json({ ok: true, url, key, expiresIn: 900 });
+  } catch (e) {
+    res.status(500).json({ ok: false, name: e.name, message: e.message });
+  }
+});
+
+// Return 405 for GET on presign to avoid confusion
+app.get(['/presign','/api/presign'], (_req, res) => res.status(405).send('Use POST /api/presign'));
+
+// ---- Start ----
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`Mixtli Relay on ${PORT}`);
+});
