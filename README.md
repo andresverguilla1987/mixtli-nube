@@ -1,12 +1,13 @@
 
-# Mixtli Relay Upload (Fixed)
-Subida vía servidor (streaming, sin CORS de bucket) y enlaces firmados de lectura.
-Incluye fix para `ERR_HTTP_HEADERS_SENT` (respuestas protegidas contra doble envío).
+# Mixtli Relay Upload (Defensive)
+- Subida vía servidor (streaming, sin CORS de bucket)
+- Fix anti "ERR_HTTP_HEADERS_SENT"
+- **Parseo defensivo** de `ALLOWED_ORIGINS` (acepta JSON o lista separada por comas, e ignora si alguien pegó `ALLOWED_ORIGINS=` dentro del valor)
 
 ## Deploy (Render)
-- Build: `npm install --no-audit --no-fund`
-- Start: `node server.js`
-- Health: `/salud`
+Build:  `npm install --no-audit --no-fund`
+Start:  `node server.js`
+Health: `/salud`
 
 ## Env
 S3_ENDPOINT=https://x3j7.or2.idrivee2-60.com
@@ -15,11 +16,6 @@ S3_BUCKET=1mixtlinube3
 S3_ACCESS_KEY_ID=<tu_key_e2>
 S3_SECRET_ACCESS_KEY=<tu_secret_e2>
 S3_FORCE_PATH_STYLE=true
-ALLOWED_ORIGINS=["https://<tu-netlify>.netlify.app","http://localhost:8888"]
-
-## Endpoints
-- POST /api/upload   (form-data: file)
-- POST /api/presign-get { key }
-- GET  /api/diag
-- GET  /api/check-bucket
-- GET  /salud
+ALLOWED_ORIGINS=["https://flourishing-salmiakki-c9b2e2.netlify.app","http://localhost:8888"]
+# o bien:
+# ALLOWED_ORIGINS=https://flourishing-salmiakki-c9b2e2.netlify.app,http://localhost:8888

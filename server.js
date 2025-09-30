@@ -9,10 +9,21 @@ const Busboy = require('busboy');
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
-// ---- CORS del servidor (no del bucket) ----
-const allowed = process.env.ALLOWED_ORIGINS
-  ? (process.env.ALLOWED_ORIGINS.includes('[') ? JSON.parse(process.env.ALLOWED_ORIGINS) : process.env.ALLOWED_ORIGINS.split(',').map(s=>s.trim()))
-  : ['http://localhost:3000','http://localhost:8888'];
+// ---- Defensive ALLOWED_ORIGINS parsing ----
+function parseAllowedOrigins(raw) {
+  if (!raw) return ['http://localhost:3000','http://localhost:8888'];
+  const cleaned = String(raw).replace(/^ALLOWED_ORIGINS\s*=/i, '').trim();
+  if (!cleaned) return ['http://localhost:3000','http://localhost:8888'];
+  if (cleaned.startsWith('[')) {
+    try {
+      const arr = JSON.parse(cleaned);
+      if (Array.isArray(arr) && arr.length) return arr.map(s=>String(s).trim()).filter(Boolean);
+    } catch (_) {}
+    return ['http://localhost:3000','http://localhost:8888'];
+  }
+  return cleaned.split(',').map(s=>s.trim()).filter(Boolean);
+}
+const allowed = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
 app.use(cors({ origin: allowed }));
 
 // ---- S3 Client (IDrive e2 compatible) ----
@@ -41,7 +52,7 @@ function sendErr(res, code, e) {
 }
 
 // ---- health ----
-app.get(['/','/salud','/api/health'], (_req,res)=> sendOk(res, { service: 'Mixtli Relay', t: Date.now() }));
+app.get(['/','/salud','/api/health'], (_req,res)=> sendOk(res, { service: 'Mixtli Relay', allowed, t: Date.now() }));
 
 // ---- diag ----
 app.get(['/diag','/api/diag'], (_req,res)=> {
@@ -90,12 +101,7 @@ app.post(['/upload','/api/upload'], (req, res) => {
   const bb = Busboy({ headers: req.headers, limits: { files: 1, fileSize: 10 * 1024 * 1024 * 1024 } }); // 10 GB
   let responded = false;
 
-  function respondOnce(fn){
-    if (responded) return true;
-    responded = true;
-    fn();
-    return false;
-  }
+  const respondOnce = (fn)=>{ if (responded) return true; responded = true; fn(); return false; };
 
   bb.on('file', async (_name, file, info) => {
     const { filename, mimeType } = info;
@@ -116,23 +122,9 @@ app.post(['/upload','/api/upload'], (req, res) => {
     }
   });
 
-  bb.on('error', (err)=>{
-    if (responded) return;
-    responded = true;
-    sendErr(res, 400, { name:'BadFormData', message: err.message });
-  });
-
-  bb.on('finish', ()=>{
-    if (responded) return;
-    responded = true;
-    sendErr(res, 400, { name:'NoFile', message:'no file' });
-  });
-
-  req.on('aborted', ()=>{
-    if (responded) return;
-    responded = true; // cliente canceló; no respondemos
-  });
-
+  bb.on('error', (err)=>{ respondOnce(()=> sendErr(res, 400, { name:'BadFormData', message: err.message })); });
+  bb.on('finish', ()=>{ respondOnce(()=> sendErr(res, 400, { name:'NoFile', message:'no file' })); });
+  req.on('aborted', ()=>{ /* cliente canceló; no respondemos */ });
   req.pipe(bb);
 });
 
