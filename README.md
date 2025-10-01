@@ -1,19 +1,14 @@
-
-# Mixtli Relay • Lossless Upload
-- Guarda **exactamente** los bytes recibidos (sin compresión / sin re-encode).
-- Sube con metadatos: `original-name`, `original-size`, `sha256`.
-- `ContentDisposition: inline; filename="<original>"` para que conserve el nombre al descargar.
+# Mixtli Relay Upload + Thumbs
+Genera **thumbs 480x320 JPG** al completar subida con Sharp.
 
 ## Endpoints
-- `POST /api/upload` (file, album?)
-- `GET  /api/health`
-- `GET  /api/check-bucket`
+- POST /api/presign, /api/presign-batch
+- POST /api/complete  (genera thumb si es imagen)
+- GET  /api/list      (incluye `thumbnail` por item)
 
-## ENVs
-S3_ENDPOINT=...
-S3_REGION=us-east-1
-S3_BUCKET=...
-S3_ACCESS_KEY_ID=...
-S3_SECRET_ACCESS_KEY=...
-S3_FORCE_PATH_STYLE=true
-ALLOWED_ORIGINS=["https://<tu-netlify>.netlify.app","http://localhost:8888"]
+## ENV
+Ver `.env.example` (usa variables S3_* para R2).
+
+## Run
+npm install
+npm start
