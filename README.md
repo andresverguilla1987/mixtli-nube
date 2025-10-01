@@ -1,8 +1,19 @@
 
-# Mixtli Relay Upload (Admin: Delete/Rename + Trash)
-Endpoints:
-- POST /api/delete { key } [X-Admin-Token] → Mueve a trash/ y borra original (+ thumb si hay).
-- POST /api/rename { key, newName } [X-Admin-Token] → Renombra (copy+delete) y mueve thumb.
-- Admin token: setear env `ADMIN_TOKEN=loquesea`. Si se omite, no se exige token.
+# Mixtli Relay • Lossless Upload
+- Guarda **exactamente** los bytes recibidos (sin compresión / sin re-encode).
+- Sube con metadatos: `original-name`, `original-size`, `sha256`.
+- `ContentDisposition: inline; filename="<original>"` para que conserve el nombre al descargar.
 
-Requiere los envs S3_* habituales y ALLOWED_ORIGINS.
+## Endpoints
+- `POST /api/upload` (file, album?)
+- `GET  /api/health`
+- `GET  /api/check-bucket`
+
+## ENVs
+S3_ENDPOINT=...
+S3_REGION=us-east-1
+S3_BUCKET=...
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+S3_FORCE_PATH_STYLE=true
+ALLOWED_ORIGINS=["https://<tu-netlify>.netlify.app","http://localhost:8888"]
