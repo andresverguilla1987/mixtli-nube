@@ -1,0 +1,24 @@
+--- a/server.js
++++ b/server.js
+@@
+ app.use(morgan('tiny'))
+@@
+ app.use(cors({
+   origin: (origin, cb)=>{
+     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true)
+     return cb(new Error('CORS blocked: ' + origin))
+   },
+   credentials: true
+ }))
++
++// NEW: Friendly root + health endpoints to avoid 404 on '/'
++app.get('/', (req, res) => {
++  res.type('application/json').send({
++    ok: true,
++    service: 'mixtli-nube',
++    endpoints: ['/salud', '/api/health', '/api/presign', '/api/complete', '/api/list']
++  });
++});
++app.get('/api/health', (req, res) => {
++  res.json({ ok: true, t: new Date().toISOString() });
++});
