@@ -1,19 +1,17 @@
 {
-  "name": "mixtli-relay-upload",
-  "version": "1.6.0",
-  "private": true,
-  "type": "commonjs",
+  "name": "mixtli-backend-e2",
+  "version": "1.0.0",
+  "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
+    "@aws-sdk/client-s3": "^3.673.0",
+    "@aws-sdk/s3-request-presigner": "^3.673.0",
     "cors": "^2.8.5",
-    "@aws-sdk/client-s3": "^3.645.0",
-    "@aws-sdk/s3-request-presigner": "^3.645.0",
-    "@aws-sdk/lib-storage": "^3.645.0",
-    "multer": "^1.4.5-lts.2",
-    "sharp": "^0.33.5"
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
+    "sharp": "^0.33.3"
   }
 }

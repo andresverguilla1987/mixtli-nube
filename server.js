@@ -1,188 +1,194 @@
+// Mixtli Nube — Backend (Render + iDrive e2 S3-compatible + Thumbnails)
+// Express API con CORS, presign PUT, complete (sharp), y list agrupado por álbum.
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import sharp from "sharp";
+import { S3Client, ListObjectsV2Command, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-const express = require('express');
-const cors = require('cors');
-const multer = require('multer');
-const path = require('node:path');
-const sharp = require('sharp');
+// ---------- ENV ----------
 const {
-  S3Client, HeadBucketCommand, PutObjectCommand, GetObjectCommand,
-  ListObjectsV2Command
-} = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const { Upload } = require('@aws-sdk/lib-storage');
+  PORT = 8080,
+  ALLOWED_ORIGINS = '["*"]',
+  E2_ENDPOINT,          // ej: https://<endpoint-regional>.idrivee2-<region>.com  (desde tu consola e2)
+  E2_ACCESS_KEY_ID,
+  E2_SECRET_ACCESS_KEY,
+  E2_BUCKET,
+  // Dominio público (opcional) para servir archivos/miniaturas si tu bucket/edge es público
+  E2_PUBLIC_BASE,
+} = process.env;
+
+if(!E2_ENDPOINT || !E2_ACCESS_KEY_ID || !E2_SECRET_ACCESS_KEY || !E2_BUCKET){
+  console.warn("⚠️  Faltan variables E2: E2_ENDPOINT, E2_ACCESS_KEY_ID, E2_SECRET_ACCESS_KEY, E2_BUCKET");
+}
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: "10mb" }));
 
-// ---- Defensive ALLOWED_ORIGINS parsing ----
-function parseAllowedOrigins(raw) {
-  if (!raw) return ['http://localhost:3000','http://localhost:8888'];
-  const cleaned = String(raw).replace(/^ALLOWED_ORIGINS\s*=/i, '').trim();
-  if (!cleaned) return ['http://localhost:3000','http://localhost:8888'];
-  if (cleaned.startsWith('[')) {
-    try {
-      const arr = JSON.parse(cleaned);
-      if (Array.isArray(arr) && arr.length) return arr.map(s=>String(s).trim()).filter(Boolean);
-    } catch (_) {}
-    return ['http://localhost:3000','http://localhost:8888'];
-  }
-  return cleaned.split(',').map(s=>s.trim()).filter(Boolean);
-}
-const allowed = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
-app.use(cors({ origin: allowed }));
+let allowed;
+try { allowed = JSON.parse(ALLOWED_ORIGINS); } catch { allowed = ["*"]; }
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || allowed.includes("*") || allowed.includes(origin)) return cb(null, true);
+    return cb(new Error("Origin not allowed: " + origin));
+  },
+  methods: ["GET","POST","OPTIONS","PUT"],
+  allowedHeaders: ["Content-Type","x-mixtli-token"]
+}));
+app.options("*", cors());
 
-// ---- S3 Client ----
+// ---------- S3 (iDrive e2) ----------
 const s3 = new S3Client({
-  endpoint: process.env.S3_ENDPOINT,
-  region: process.env.S3_REGION || 'us-east-1',
-  forcePathStyle: String(process.env.S3_FORCE_PATH_STYLE || 'true') === 'true',
+  region: "auto",
+  endpoint: E2_ENDPOINT,          // IMPORTANTE: usa el endpoint de e2 (S3 compatible)
+  forcePathStyle: true,           // e2 suele requerir path-style
   credentials: {
-    accessKeyId: process.env.S3_ACCESS_KEY_ID,
-    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY
+    accessKeyId: E2_ACCESS_KEY_ID,
+    secretAccessKey: E2_SECRET_ACCESS_KEY,
+  },
+});
+
+// Helpers
+const bytes = (n)=> n==null ? 0 : Number(n);
+const cleanKey = (k="") => k.replace(/^\/+/, "");
+const albumOf = (key="") => {
+  const m = key.match(/^albums\/([^\/]+)\/.+$/);
+  return m ? decodeURIComponent(m[1]) : "misc";
+};
+const thumbKeyOf = (origKey="") => {
+  const parts = origKey.split("/");
+  const file = parts.pop() || "file";
+  const album = parts.length>=2 && parts[0]==="albums" ? parts[1] : "misc";
+  const outName = file.replace(/\.(png|jpg|jpeg|webp|gif|avif|heic)$/i, "") + ".jpg";
+  return `thumbs/${album}/${outName}`;
+};
+const joinPublic = (base, key) => `${base.replace(/\/+$/,"")}/${encodeURIComponent(key).replace(/%2F/g,"/")}`;
+
+// ---------- Rutas API ----------
+const router = express.Router();
+
+router.get("/salud", (req,res)=> res.json({ ok:true, ts: Date.now() }));
+
+// Presign para PUT directo al bucket
+router.post("/presign", async (req,res) => {
+  try{
+    const { key, contentType="application/octet-stream" } = req.body || {};
+    if(!key) return res.status(400).json({ ok:false, message:"key requerida" });
+    const Key = cleanKey(key);
+    const put = new PutObjectCommand({ Bucket: E2_BUCKET, Key, ContentType: contentType });
+    const url = await getSignedUrl(s3, put, { expiresIn: 60 * 5 });
+    return res.json({ ok:true, url });
+  }catch(err){
+    console.error("presign error", err);
+    return res.status(500).json({ ok:false, message: String(err) });
   }
 });
-const BUCKET = process.env.S3_BUCKET;
 
-// ---- helpers ----
-function sendOk(res, data = {}) { if (!res.headersSent) res.json({ ok: true, ...data }); }
-function sendErr(res, code, e) {
-  if (res.headersSent) return;
-  const body = e && e.name ? { ok:false, name:e.name, message:e.message } : { ok:false, error:String(e||'error') };
-  res.status(code).json(body);
-}
-const slug = (s)=> String(s||'').normalize('NFKD').replace(/[^\w\s.-]/g,'').trim().replace(/\s+/g,'-').toLowerCase().slice(0,80);
-const safeName = (n)=> String(n||'file.bin').replace(/[^a-zA-Z0-9._-]/g,'_');
-
-// ---- health ----
-app.get(['/','/salud','/api/health'], (_req,res)=> sendOk(res, { service: 'Mixtli Relay', allowed, t: Date.now() }));
-
-// ---- presign GET / batch ----
-app.post(['/presign-get','/api/presign-get'], async (req,res) => {
+// Complete: genera miniatura 480x320 JPG y la sube a thumbs/<album>/<name>.jpg
+router.post("/complete", async (req,res) => {
   try{
-    const { key, expiresIn=900 } = req.body || {};
-    if(!key) return sendErr(res, 400, { name:'BadRequest', message:'Missing key' });
-    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn });
-    sendOk(res, { url, expiresIn });
-  }catch(e){ sendErr(res, 500, e); }
-});
-app.post(['/presign-batch','/api/presign-batch'], async (req,res) => {
-  try{
-    const { keys, expiresIn=900 } = req.body || {};
-    if(!Array.isArray(keys) || !keys.length) return sendErr(res, 400, { name:'BadRequest', message:'Missing keys' });
-    const out = {};
-    await Promise.all(keys.map(async (k)=>{
-      out[k] = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: k }), { expiresIn });
-    }));
-    sendOk(res, { urls: out, expiresIn });
-  }catch(e){ sendErr(res, 500, e); }
-});
+    const { key } = req.body || {};
+    if(!key) return res.status(400).json({ ok:false, message:"key requerida" });
+    const Key = cleanKey(key);
 
-// ---- upload (multer) + thumbnail generation ----
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 * 1024 } }); // 10GB
-app.post(['/upload','/api/upload'], upload.single('file'), async (req, res) => {
-  try{
-    if (!req.file) return sendErr(res, 400, { name:'NoFile', message:'no file' });
-    const album = slug(req.body?.album || '');
-    const base = album ? `albums/${album}` : 'uploads';
-    const fname = safeName(req.file.originalname);
-    const key = `${base}/${Date.now()}_${fname}`;
-
-    // Upload original
-    const uploader = new Upload({
-      client: s3,
-      params: { Bucket: BUCKET, Key: key, Body: req.file.buffer, ContentType: req.file.mimetype || 'application/octet-stream' },
-      queueSize: 4, partSize: 8 * 1024 * 1024
-    });
-    await uploader.done();
-
-    // If image, generate thumbnail to thumbs/<key>.jpg
-    const isImg = /image\/(png|jpe?g|webp|gif|avif)/i.test(req.file.mimetype || '');
-    let thumbKey = null;
-    if (isImg) {
-      try{
-        const tbuf = await sharp(req.file.buffer).rotate().resize({ width: 480, height: 320, fit: 'cover' }).jpeg({ quality: 78 }).toBuffer();
-        thumbKey = `thumbs/${key}.jpg`;
-        await s3.send(new PutObjectCommand({
-          Bucket: BUCKET, Key: thumbKey, Body: tbuf, ContentType: 'image/jpeg'
-        }));
-      }catch(thErr){
-        console.warn('thumb failed:', thErr?.message || thErr);
+    // 1) Obtener original
+    let inputBuffer;
+    try{
+      if(E2_PUBLIC_BASE){
+        const publicUrl = joinPublic(E2_PUBLIC_BASE, Key);
+        const r = await fetch(publicUrl);
+        if(!r.ok) throw new Error(`GET public ${r.status}`);
+        inputBuffer = Buffer.from(await r.arrayBuffer());
+      }else{
+        const get = new GetObjectCommand({ Bucket: E2_BUCKET, Key });
+        const r = await s3.send(get);
+        inputBuffer = Buffer.from(await r.Body.transformToByteArray());
       }
+    }catch(err){
+      console.error("complete:GetObject", err);
+      return res.status(500).json({ ok:false, message:"No se pudo leer original para hacer thumb" });
     }
 
-    sendOk(res, { key, thumbKey });
-  }catch(e){ sendErr(res, 500, e); }
-});
+    // 2) Procesar con sharp
+    const out = await sharp(inputBuffer).rotate().resize(480, 320, { fit: "cover" }).jpeg({ quality: 80 }).toBuffer();
+    const thumbKey = thumbKeyOf(Key);
 
-// ---- list albums ----
-app.get(['/albums','/api/albums'], async (req,res) => {
-  try{
-    const Prefix = 'albums/'; const Delimiter = '/';
-    const cmd = new ListObjectsV2Command({ Bucket: BUCKET, Prefix, Delimiter, MaxKeys: 1000 });
-    const resp = await s3.send(cmd);
-    const out = (resp.CommonPrefixes || []).map(p => (p.Prefix||'').slice(Prefix.length, -1)).filter(Boolean);
-    sendOk(res, { albums: out });
-  }catch(e){ sendErr(res, 500, e); }
-});
-
-// ---- list items (excluye manifest) ----
-app.get(['/list','/api/list'], async (req,res) => {
-  try{
-    const album = slug(req.query.album || '');
-    const prefix = album ? `albums/${album}/` : 'uploads/';
-    const max = Math.min(parseInt(req.query.max || '60',10), 1000);
-    const token = req.query.token || undefined;
-
-    const cmd = new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, MaxKeys: max, ContinuationToken: token });
-    const r = await s3.send(cmd);
-    const items = (r.Contents || [])
-      .filter(o=>o.Key !== prefix && !o.Key.endsWith('/manifest.json'))
-      .sort((a,b)=> (b.LastModified?.getTime()||0) - (a.LastModified?.getTime()||0))
-      .map(o => ({
-        key: o.Key,
-        size: o.Size,
-        lastModified: o.LastModified ? o.LastModified.toISOString() : null,
-        ext: path.extname(o.Key||'').slice(1).toLowerCase(),
-        thumb: `thumbs/${o.Key}.jpg`
-      }));
-    sendOk(res, { items, nextToken: r.IsTruncated ? r.NextContinuationToken : null, prefix });
-  }catch(e){ sendErr(res, 500, e); }
-});
-
-// ---- album manifest (favorites) ----
-async function getManifest(album){
-  const mkey = `albums/${album}/manifest.json`;
-  try {
-    const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: mkey }));
-    const buf = await obj.Body.transformToByteArray();
-    const txt = Buffer.from(buf).toString('utf8');
-    const json = JSON.parse(txt);
-    return { key: mkey, json: json && typeof json==='object' ? json : {} };
-  } catch (e) {
-    return { key: mkey, json: {} };
-  }
-}
-app.get(['/album-manifest','/api/album-manifest'], async (req,res) => {
-  try{
-    const album = slug(req.query.album || '');
-    if(!album) return sendErr(res, 400, { name:'BadRequest', message:'Missing album' });
-    const m = await getManifest(album);
-    sendOk(res, { key: m.key, manifest: m.json });
-  }catch(e){ sendErr(res, 500, e); }
-});
-app.post(['/album-manifest','/api/album-manifest'], async (req,res) => {
-  try{
-    const album = slug(req.body?.album || '');
-    const favorites = Array.isArray(req.body?.favorites) ? req.body.favorites : [];
-    if(!album) return sendErr(res, 400, { name:'BadRequest', message:'Missing album' });
-    const mkey = `albums/${album}/manifest.json`;
-    const body = Buffer.from(JSON.stringify({ favorites }, null, 2));
+    // 3) Subir thumb
     await s3.send(new PutObjectCommand({
-      Bucket: BUCKET, Key: mkey, Body: body, ContentType: 'application/json; charset=utf-8'
+      Bucket: E2_BUCKET, Key: thumbKey, Body: out, ContentType: "image/jpeg"
     }));
-    sendOk(res, { key: mkey, favorites });
-  }catch(e){ sendErr(res, 500, e); }
+
+    return res.json({ ok:true, thumbKey });
+  }catch(err){
+    console.error("complete error", err);
+    return res.status(500).json({ ok:false, message: String(err) });
+  }
 });
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, ()=> console.log('Mixtli Relay on', PORT));
+// List agrupado por álbum (usa prefijo albums/)
+router.get("/list", async (req,res)=> {
+  try{
+    let ContinuationToken = undefined;
+    const all = [];
+    do{
+      const out = await s3.send(new ListObjectsV2Command({
+        Bucket: E2_BUCKET, Prefix: "albums/", ContinuationToken
+      }));
+      (out.Contents||[]).forEach(obj => all.push(obj));
+      ContinuationToken = out.IsTruncated ? out.NextContinuationToken : undefined;
+    }while(ContinuationToken);
+
+    const albums = new Map();
+    for(const obj of all){
+      const key = String(obj.Key);
+      const album = albumOf(key);
+      const size = bytes(obj.Size);
+      const updatedAt = obj.LastModified ? new Date(obj.LastModified).toISOString() : null;
+      const url = E2_PUBLIC_BASE ? joinPublic(E2_PUBLIC_BASE, key) : null;
+      const entry = { key, size, url, updatedAt };
+      if(!albums.has(album)) albums.set(album, { id: album, name: album, items: [], updatedAt });
+      const a = albums.get(album);
+      a.items.push(entry);
+      a.updatedAt = updatedAt || a.updatedAt;
+    }
+
+    // Vincular thumbs si existen
+    try{
+      let CT = undefined; const thumbs = [];
+      do{
+        const out = await s3.send(new ListObjectsV2Command({
+          Bucket: E2_BUCKET, Prefix: "thumbs/", ContinuationToken: CT
+        }));
+        (out.Contents||[]).forEach(obj => thumbs.push(obj.Key));
+        CT = out.IsTruncated ? out.NextContinuationToken : undefined;
+      }while(CT);
+      const tset = new Set(thumbs);
+      for(const a of albums.values()){
+        for(const item of a.items){
+          const tKey = thumbKeyOf(item.key);
+          if(tset.has(tKey)){
+            item.thumbnail = E2_PUBLIC_BASE ? joinPublic(E2_PUBLIC_BASE, tKey) : null;
+          }
+        }
+      }
+    }catch(e){ console.warn("thumbs listing skipped:", e.message); }
+
+    const list = Array.from(albums.values()).sort((x,y)=> new Date(y.updatedAt||0) - new Date(x.updatedAt||0));
+    res.json({ ok:true, albums: list });
+  }catch(err){
+    console.error("list error", err);
+    res.status(500).json({ ok:false, message: String(err) });
+  }
+});
+
+// JSON 404 para /api
+router.use((req,res)=> res.status(404).json({ ok:false, message:"Ruta no encontrada", path: req.path }));
+
+app.use("/api", router);
+
+// Raíz (informativo)
+app.get("/", (req,res)=> res.status(404).send("Mixtli API — usa /api/*"));
+
+// Start
+app.listen(PORT, ()=> console.log("Mixtli API on", PORT));

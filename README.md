@@ -1,8 +1,20 @@
+# Mixtli Backend — iDrive e2 (S3 compatible)
 
-# Mixtli Relay Upload (Thumbnails Reales)
-- Genera miniaturas al subir imágenes con Sharp (480x320, JPG).
-- Guarda original en `albums/<album>/...` y thumb en `thumbs/<key>.jpg`.
-- Lista de items incluye `thumb`.
-- `/api/presign-batch` te firma en lote cualquier key (original o thumb).
+Rutas:
+- GET /api/salud
+- GET /api/list
+- POST /api/presign
+- POST /api/complete
 
-**Requisitos Render**: `npm install` descarga Sharp prebuild (x64). Si falla, Render recompila.
+## Variables de entorno
+E2_ENDPOINT=https://<ENDPOINT_DE_TU_REGION>          # desde la consola e2
+E2_ACCESS_KEY_ID=********************************
+E2_SECRET_ACCESS_KEY=****************************
+E2_BUCKET=mixtli
+E2_PUBLIC_BASE=https://tu-dominio-publico-e2 (opcional, si sirves archivos públicamente)
+ALLOWED_ORIGINS=["https://flourishing-salmiakki-c9b2e2.netlify.app","http://localhost:5173"]
+NODE_VERSION=20
+
+## Render
+Build command: npm install --omit=dev
+Start command: node server.js
