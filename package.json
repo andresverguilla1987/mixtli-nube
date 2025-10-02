@@ -1,5 +1,5 @@
 {
-  "name": "mixtli-relay-upload-multer",
+  "name": "mixtli-relay-upload-admin",
   "version": "1.0.0",
   "type": "module",
   "main": "server.js",
