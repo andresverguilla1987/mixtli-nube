@@ -1,4 +1,4 @@
-// Mixtli Nube — Backend iDrive e2 (root 200 JSON)
+// Mixtli Nube — Backend iDrive e2 (con proxy de subida para evitar CORS del bucket)
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
@@ -34,6 +34,7 @@ const pub = (b,k)=> `${b.replace(/\/+$/,"")}/${encodeURIComponent(k).replace(/%2
 
 // ---- App & CORS ----
 const app = express();
+// JSON solo para endpoints JSON; el proxy binario usa express.raw más abajo
 app.use(express.json({limit:"10mb"}));
 let allowed; try{ allowed = JSON.parse(ALLOWED_ORIGINS); } catch { allowed = ["*"]; }
 app.use(cors({
@@ -76,7 +77,7 @@ r.get("/debug-env", (req,res)=>{
   });
 });
 
-// Sign PUT URL
+// Sign PUT URL (para cuando CORS del bucket sí funcione)
 r.post("/presign", async (req,res)=>{
   try{
     const Bucket = need("E2_BUCKET");
@@ -91,7 +92,22 @@ r.post("/presign", async (req,res)=>{
   }
 });
 
-// Complete → generate 480x320
+// Proxy de subida (evita CORS del bucket). Enviar el binario al body del POST.
+r.post("/upload-direct", express.raw({ type: "*/*", limit: "100mb" }), async (req,res)=>{
+  try{
+    const Bucket = need("E2_BUCKET");
+    const key = clean(String(req.query.key || ""));
+    if(!key) return res.status(400).json({ ok:false, where:"input", message:"?key=albums/<album>/<file> requerido" });
+    const ct = req.header("content-type") || "application/octet-stream";
+    const body = req.body; // Buffer gracias a express.raw
+    await s3.send(new PutObjectCommand({ Bucket, Key: key, Body: body, ContentType: ct }));
+    res.json({ ok:true, key });
+  }catch(err){
+    res.status(500).json({ ok:false, where:"upload-direct", message: String(err?.message || err) });
+  }
+});
+
+// Complete → genera thumb 480x320
 r.post("/complete", async (req,res)=>{
   try{
     const Bucket = need("E2_BUCKET");
@@ -150,14 +166,14 @@ r.get("/list", async (req,res)=>{
   }
 });
 
-// JSON 404 para rutas no encontradas dentro del router
+// JSON 404
 r.use((req,res)=> res.status(404).json({ ok:false, message:"Ruta no encontrada", path: req.path }));
 
 // Mount (accept both /api/* and /*)
 app.use("/api", r);
 app.use("/", r);
 
-// Root now responds 200 JSON
+// Root 200 JSON
 app.get("/", (req,res)=> res.json({ ok:true, service:"Mixtli API", use:"/api/*" }));
 
 // Start
