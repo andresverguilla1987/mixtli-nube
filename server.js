@@ -1,180 +1,113 @@
-// Mixtli Nube — Backend iDrive e2 (con proxy de subida para evitar CORS del bucket)
+// Mixtli Relay (multer upload) — compatible con iDrive e2
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
-import sharp from "sharp";
-import { S3Client, ListObjectsV2Command, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import multer from "multer";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
+// ===== Env (como en tu captura de pantalla) =====
 const {
   PORT = 8080,
-  ALLOWED_ORIGINS = '["*"]',
-  E2_ENDPOINT,
-  E2_ACCESS_KEY_ID,
-  E2_SECRET_ACCESS_KEY,
-  E2_BUCKET,
-  E2_PUBLIC_BASE,
+  S3_ENDPOINT,
+  S3_REGION = "auto",
+  S3_BUCKET,
+  S3_ACCESS_KEY_ID,
+  S3_SECRET_ACCESS_KEY,
+  S3_FORCE_PATH_STYLE = "true",
+  ALLOWED_ORIGINS = '["*"]'
 } = process.env;
 
-// ---- Helpers ----
-const need = (n) => {
-  const v = process.env[n];
-  if (!v || !String(v).trim()) throw new Error(`Falta variable ${n}`);
+// ===== Util =====
+const need = (k) => {
+  const v = process.env[k];
+  if (!v || !String(v).trim()) throw new Error(`Falta env ${k}`);
   return String(v).trim();
 };
-const clean = (k="") => k.replace(/^\/+/, "");
-const album = (k="") => (k.match(/^albums\/([^\/]+)\//)||[])[1]||"misc";
-const tkey  = (k="") => {
-  const p = k.split("/");
-  const f = p.pop() || "file";
-  const a = p.length>=2 && p[0]==="albums" ? p[1] : "misc";
-  return `thumbs/${a}/${f.replace(/\.(png|jpg|jpeg|webp|gif|avif|heic)$/i,"")}.jpg`;
-};
-const pub = (b,k)=> `${b.replace(/\/+$/,"")}/${encodeURIComponent(k).replace(/%2F/g,"/")}`;
+const clean = (k="") => String(k).replace(/^\/+/, "");
 
-// ---- App & CORS ----
-const app = express();
-// JSON solo para endpoints JSON; el proxy binario usa express.raw más abajo
-app.use(express.json({limit:"10mb"}));
-let allowed; try{ allowed = JSON.parse(ALLOWED_ORIGINS); } catch { allowed = ["*"]; }
-app.use(cors({
-  origin: (o,cb)=>{
-    if(!o || allowed.includes("*") || allowed.includes(o)) return cb(null,true);
-    return cb(new Error("Origin not allowed: "+o));
+// ===== S3 client (iDrive e2) =====
+const s3 = new S3Client({
+  region: S3_REGION || "auto",
+  endpoint: need("S3_ENDPOINT"),
+  forcePathStyle: String(S3_FORCE_PATH_STYLE).toLowerCase() !== "false",
+  credentials: {
+    accessKeyId: need("S3_ACCESS_KEY_ID"),
+    secretAccessKey: need("S3_SECRET_ACCESS_KEY"),
   },
-  methods:["GET","POST","PUT","OPTIONS"],
-  allowedHeaders:["Content-Type"]
+});
+
+// ===== App & CORS =====
+const app = express();
+let allowed; try { allowed = JSON.parse(ALLOWED_ORIGINS); } catch { allowed = ["*"]; }
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || allowed.includes("*") || allowed.includes(origin)) return cb(null, true);
+    return cb(new Error("Origin not allowed: " + origin));
+  },
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: ["Content-Type"]
 }));
 app.options("*", cors());
+app.use(express.json({ limit: "10mb" }));
 
-// ---- S3 Client (path-style ON) ----
-function makeClient(){
-  const endpoint = need("E2_ENDPOINT");
-  const accessKeyId = need("E2_ACCESS_KEY_ID");
-  const secretAccessKey = need("E2_SECRET_ACCESS_KEY");
-  need("E2_BUCKET"); // validate presence now
-  return new S3Client({
-    region:"auto",
-    endpoint,
-    forcePathStyle:true,
-    credentials:{ accessKeyId, secretAccessKey }
-  });
-}
-const s3 = makeClient();
+// ===== Multer (memoria) =====
+const upload = multer({ storage: multer.memoryStorage() });
 
-// ---- Router ----
-const r = express.Router();
+// ===== Endpoints =====
+app.get("/", (req,res)=> res.json({ ok:true, service:"Mixtli Relay Upload (multer)", use:"/api/*" }));
+app.get("/api/salud", (req,res)=> res.json({ ok:true, ts: Date.now() }));
 
-r.get("/salud", (req,res)=> res.json({ok:true, ts: Date.now()}));
-
-r.get("/debug-env", (req,res)=>{
+// Diagnóstico simple de headers y origen
+app.get("/api/diag", (req,res)=>{
   res.json({
     ok:true,
-    E2_ENDPOINT: !!E2_ENDPOINT,
-    E2_BUCKET: E2_BUCKET || null,
-    E2_PUBLIC_BASE: E2_PUBLIC_BASE || null,
-    ALLOWED_ORIGINS
+    origin:req.headers.origin || null,
+    contentType:req.headers["content-type"] || null,
+    allowedOrigins: allowed,
+    bucket:S3_BUCKET || null,
+    endpoint:S3_ENDPOINT || null,
+    forcePathStyle: String(S3_FORCE_PATH_STYLE).toLowerCase() !== "false"
   });
 });
 
-// Sign PUT URL (para cuando CORS del bucket sí funcione)
-r.post("/presign", async (req,res)=>{
-  try{
-    const Bucket = need("E2_BUCKET");
-    const { key, contentType="application/octet-stream" } = req.body || {};
-    if(!key) return res.status(400).json({ok:false, where:"input", message:"key requerida"});
-    const Key = clean(key);
-    const cmd = new PutObjectCommand({ Bucket, Key, ContentType: contentType });
-    const url = await getSignedUrl(s3, cmd, { expiresIn: 60*5 });
-    res.json({ ok:true, url });
-  }catch(err){
-    res.status(500).json({ ok:false, where:"presign", message: String(err?.message || err) });
+// Subida via backend (evita CORS del bucket)
+// FormData:  field "file", query: ?key=albums/<album>/<archivo>
+app.post("/api/upload", upload.single("file"), async (req,res)=>{
+  try {
+    const Bucket = need("S3_BUCKET");
+    const Key = clean(String(req.query.key || ""));
+    if (!Key) return res.status(400).json({ ok:false, where:"input", message:"?key=albums/<album>/<archivo> requerido" });
+    if (!req.file || !req.file.buffer) return res.status(400).json({ ok:false, where:"input", message:"FormData 'file' requerido" });
+
+    const ContentType = req.file.mimetype || "application/octet-stream";
+    await s3.send(new PutObjectCommand({
+      Bucket, Key, Body: req.file.buffer, ContentType
+    }));
+
+    res.json({ ok:true, key: Key, size: req.file.size, contentType: ContentType });
+  } catch (e) {
+    res.status(500).json({ ok:false, where:"upload", message: String(e?.message || e) });
   }
 });
 
-// Proxy de subida (evita CORS del bucket). Enviar el binario al body del POST.
-r.post("/upload-direct", express.raw({ type: "*/*", limit: "100mb" }), async (req,res)=>{
-  try{
-    const Bucket = need("E2_BUCKET");
-    const key = clean(String(req.query.key || ""));
-    if(!key) return res.status(400).json({ ok:false, where:"input", message:"?key=albums/<album>/<file> requerido" });
-    const ct = req.header("content-type") || "application/octet-stream";
-    const body = req.body; // Buffer gracias a express.raw
-    await s3.send(new PutObjectCommand({ Bucket, Key: key, Body: body, ContentType: ct }));
-    res.json({ ok:true, key });
-  }catch(err){
-    res.status(500).json({ ok:false, where:"upload-direct", message: String(err?.message || err) });
+// Link privado temporal (GET presign)
+app.post("/api/presign-get", async (req,res)=>{
+  try {
+    const Bucket = need("S3_BUCKET");
+    const { key, expiresIn = 900 } = req.body || {};
+    if (!key) return res.status(400).json({ ok:false, where:"input", message:"key requerido" });
+    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket, Key: clean(key) }), { expiresIn });
+    res.json({ ok:true, url, expiresIn });
+  } catch (e) {
+    res.status(500).json({ ok:false, where:"presign-get", message: String(e?.message || e) });
   }
 });
 
-// Complete → genera thumb 480x320
-r.post("/complete", async (req,res)=>{
-  try{
-    const Bucket = need("E2_BUCKET");
-    const { key } = req.body || {};
-    if(!key) return res.status(400).json({ok:false, where:"input", message:"key requerida"});
-    const Key = clean(key);
+// 404 JSON
+app.use((req,res)=> res.status(404).json({ ok:false, message:"Ruta no encontrada", path:req.path }));
 
-    let buf;
-    if(E2_PUBLIC_BASE){
-      const u = pub(E2_PUBLIC_BASE, Key);
-      const rr = await fetch(u);
-      if(!rr.ok) throw new Error("GET public "+rr.status);
-      buf = Buffer.from(await rr.arrayBuffer());
-    } else {
-      const go = await s3.send(new GetObjectCommand({ Bucket, Key }));
-      buf = Buffer.from(await go.Body.transformToByteArray());
-    }
-
-    const out = await sharp(buf).rotate().resize(480,320,{fit:"cover"}).jpeg({quality:80}).toBuffer();
-    const TK = tkey(Key);
-    await s3.send(new PutObjectCommand({ Bucket, Key: TK, Body: out, ContentType:"image/jpeg" }));
-    res.json({ ok:true, thumbKey: TK });
-  }catch(err){
-    res.status(500).json({ ok:false, where:"complete", message: String(err?.message || err) });
-  }
-});
-
-// List
-r.get("/list", async (req,res)=>{
-  try{
-    const Bucket = need("E2_BUCKET");
-    let CT; const all=[];
-    do{
-      const out = await s3.send(new ListObjectsV2Command({ Bucket, Prefix:"albums/", ContinuationToken: CT }));
-      (out.Contents||[]).forEach(o=>all.push(o));
-      CT = out.IsTruncated ? out.NextContinuationToken : undefined;
-    }while(CT);
-    const albums=new Map();
-    for(const o of all){
-      const k = String(o.Key);
-      const a = album(k);
-      const entry = {
-        key:k,
-        size:Number(o.Size||0),
-        url: E2_PUBLIC_BASE ? pub(E2_PUBLIC_BASE,k) : null,
-        updatedAt: o.LastModified ? new Date(o.LastModified).toISOString() : null
-      };
-      if(!albums.has(a)) albums.set(a,{id:a,name:a,items:[],updatedAt:entry.updatedAt});
-      const A = albums.get(a);
-      A.items.push(entry);
-      A.updatedAt = entry.updatedAt || A.updatedAt;
-    }
-    res.json({ ok:true, albums: [...albums.values()] });
-  }catch(err){
-    res.status(500).json({ ok:false, where:"list", message: String(err?.message || err) });
-  }
-});
-
-// JSON 404
-r.use((req,res)=> res.status(404).json({ ok:false, message:"Ruta no encontrada", path: req.path }));
-
-// Mount (accept both /api/* and /*)
-app.use("/api", r);
-app.use("/", r);
-
-// Root 200 JSON
-app.get("/", (req,res)=> res.json({ ok:true, service:"Mixtli API", use:"/api/*" }));
-
-// Start
-app.listen(PORT, ()=> console.log("Mixtli API on", PORT));
+app.listen(PORT, ()=> console.log("Mixtli Relay Upload (multer) on", PORT));
