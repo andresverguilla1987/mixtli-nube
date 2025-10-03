@@ -1,5 +1,5 @@
 {
-  "name": "mixtli-relay-upload-admin",
+  "name": "mixtli-relay-upload-admin-pin",
   "version": "1.0.0",
   "type": "module",
   "main": "server.js",
