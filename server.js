@@ -1,8 +1,9 @@
-// Mixtli Relay + Admin + PIN por álbum (completo)
+// Mixtli Relay + Admin + PIN + ZIP por álbum
 import express from "express";
 import cors from "cors";
 import multer from "multer";
 import crypto from "crypto";
+import archiver from "archiver";
 import {
   S3Client,
   PutObjectCommand,
@@ -117,7 +118,7 @@ function requireAdmin(req,res,next){
 }
 
 // Públicos
-app.get("/", (req,res)=> res.json({ ok:true, service:"Mixtli Relay + Admin + PIN", use:"/api/*" }));
+app.get("/", (req,res)=> res.json({ ok:true, service:"Mixtli Relay + Admin + PIN + ZIP", use:"/api/*" }));
 app.get("/api/salud", (req,res)=> res.json({ ok:true, ts: Date.now() }));
 app.get("/api/diag", (req,res)=>{
   res.json({ ok:true, origin:req.headers.origin||null, contentType:req.headers["content-type"]||null, allowedOrigins: allowed,
@@ -199,7 +200,51 @@ app.get("/api/album/list", async (req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, where:"album.list", message:String(e?.message||e) }); }
 });
 
-// Admin básicos
+// -------- ZIP por álbum o selección --------
+app.post("/api/album/zip", async (req,res)=>{
+  try{
+    const { album, keys } = req.body || {};
+    if(!album) return res.status(400).json({ ok:false, message:"album requerido" });
+    // validar token si está protegido
+    const Bucket = need("S3_BUCKET");
+    const Key = pinKey(album);
+    let hasPin=false;
+    try{ await s3.send(new HeadObjectCommand({ Bucket, Key })); hasPin = true; }catch{ hasPin=false; }
+    if (hasPin){
+      const tok = req.headers["x-album-token"];
+      const payload = verify(tok);
+      if (!payload || payload.album !== album) return res.status(401).json({ ok:false, message:"token inválido/expirado" });
+    }
+
+    // determinar lista de archivos
+    let list = Array.isArray(keys) && keys.length ? keys.map(clean) : await listAll(`albums/${album}/`);
+    if (!list.length) return res.status(404).json({ ok:false, message:"No hay archivos" });
+
+    // headers de descarga
+    const fname = `${album}-${Date.now()}.zip`;
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
+
+    // crear zip y hacer pipe al response
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("error", err => { try{ res.status(500).end(); }catch{} });
+    archive.pipe(res);
+
+    // ir anexando streams desde S3
+    for (const k of list){
+      const cmd = new GetObjectCommand({ Bucket, Key: k });
+      const obj = await s3.send(cmd);
+      const stream = obj.Body; // Readable
+      const rel = k.split("/").slice(2).join("/"); // remover albums/<album>/
+      archive.append(stream, { name: rel || k.split("/").pop() });
+    }
+    archive.finalize();
+  }catch(e){
+    res.status(500).json({ ok:false, where:"album.zip", message:String(e?.message||e) });
+  }
+});
+
+// Admin
 app.post("/api/admin/ping", requireAdmin, (req,res)=> res.json({ ok:true, admin:true }));
 app.post("/api/admin/item/delete", requireAdmin, async (req,res)=>{
   try{
@@ -253,4 +298,4 @@ app.post("/api/admin/album/restore", requireAdmin, async (req,res)=>{
 });
 
 app.use((req,res)=> res.status(404).json({ ok:false, message:"Ruta no encontrada", path:req.path }));
-app.listen(PORT, ()=> console.log("Mixtli Relay + Admin + PIN on", PORT));
+app.listen(PORT, ()=> console.log("Mixtli Relay + Admin + PIN + ZIP on", PORT));
