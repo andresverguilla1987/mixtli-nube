@@ -1,16 +1,17 @@
-Mixtli Relay (fix CORS + rutas)
-===============================
+# Mixtli API (Render)
 
-ENV requeridas en Render:
-- E2_ENDPOINT=https://<tu-endpoint>.idrivee2-60.com
+Endpoints:
+- GET / -> health
+- GET /api/diag
+- GET /api/list?album=personal
+- GET /api/album/list?album=personal
+- POST /api/presign { key, contentType }
+- GET  /api/presign-get?key=...&contentType=...
+
+## Env
+- E2_ENDPOINT=https://s3.us-???-1.idrivee2-XX.com
 - E2_REGION=us-east-1
-- E2_BUCKET=1mixtlinube3
-- E2_ACCESS_KEY_ID=xxxx
-- E2_SECRET_ACCESS_KEY=xxxx
-- E2_PUBLIC_BASE=https://x3j7.or2.idrivee2-60.com/1mixtlinube3  (opcional)
-- FORCE_PATH_STYLE=true
-- ALLOWED_ORIGINS=["https://flourishing-salmiakki-c9b2e2.netlify.app","http://localhost:8888"]
-
-Arranque:
-  npm install --no-audit --no-fund
-  node server.js
+- E2_ACCESS_KEY_ID=...
+- E2_SECRET_ACCESS_KEY=...
+- E2_BUCKET=mixtli-{tu-bucket}
+- ALLOWED_ORIGINS=["https://<tu-sitio-netlify>.netlify.app"]
