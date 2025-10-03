@@ -1,29 +1,19 @@
-// Mixtli Relay + Admin + PIN + ZIP por álbum
+// Mixtli Relay • PRIVADO (sin links públicos). Upload + PIN + Admin + ZIP
 import express from "express";
 import cors from "cors";
 import multer from "multer";
 import crypto from "crypto";
 import archiver from "archiver";
 import {
-  S3Client,
-  PutObjectCommand,
-  GetObjectCommand,
-  ListObjectsV2Command,
-  CopyObjectCommand,
-  DeleteObjectCommand,
-  DeleteObjectsCommand,
-  HeadObjectCommand
+  S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command,
+  CopyObjectCommand, DeleteObjectCommand, DeleteObjectsCommand, HeadObjectCommand
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const {
   PORT = 8080,
-  S3_ENDPOINT,
-  S3_REGION = "auto",
-  S3_BUCKET,
-  S3_ACCESS_KEY_ID,
-  S3_SECRET_ACCESS_KEY,
-  S3_FORCE_PATH_STYLE = "true",
+  S3_ENDPOINT, S3_REGION = "auto", S3_BUCKET,
+  S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_FORCE_PATH_STYLE = "true",
   ALLOWED_ORIGINS = '["*"]',
   ADMIN_TOKEN = "",
   ACCESS_SECRET
@@ -36,7 +26,6 @@ const need = (k) => {
 };
 const clean = (k="") => String(k).replace(/^\/+/, "");
 
-// S3
 const s3 = new S3Client({
   region: S3_REGION || "auto",
   endpoint: need("S3_ENDPOINT"),
@@ -44,7 +33,6 @@ const s3 = new S3Client({
   credentials: { accessKeyId: need("S3_ACCESS_KEY_ID"), secretAccessKey: need("S3_SECRET_ACCESS_KEY") },
 });
 
-// App + CORS
 const app = express();
 let allowed; try { allowed = JSON.parse(ALLOWED_ORIGINS); } catch { allowed = ["*"]; }
 app.use(cors({
@@ -58,10 +46,9 @@ app.use(cors({
 app.options("*", cors());
 app.use(express.json({ limit: "10mb" }));
 
-// Multer
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Helpers
+// Utils
 async function listAll(prefix){
   const Bucket = need("S3_BUCKET");
   let ContinuationToken, out = [];
@@ -117,14 +104,11 @@ function requireAdmin(req,res,next){
   return res.status(401).json({ ok:false, where:"admin", message:"Token inválido" });
 }
 
-// Públicos
-app.get("/", (req,res)=> res.json({ ok:true, service:"Mixtli Relay + Admin + PIN + ZIP", use:"/api/*" }));
-app.get("/api/salud", (req,res)=> res.json({ ok:true, ts: Date.now() }));
-app.get("/api/diag", (req,res)=>{
-  res.json({ ok:true, origin:req.headers.origin||null, contentType:req.headers["content-type"]||null, allowedOrigins: allowed,
-    bucket:S3_BUCKET||null, endpoint:S3_ENDPOINT||null, forcePathStyle: String(S3_FORCE_PATH_STYLE).toLowerCase()!=="false" });
-});
+// Salud/diag
+app.get("/", (req,res)=> res.json({ ok:true, service:"Mixtli Relay PRIVATE", use:"/api/*" }));
+app.get("/api/diag", (req,res)=> res.json({ ok:true, bucket:S3_BUCKET||null, endpoint:S3_ENDPOINT||null }));
 
+// Upload directo (opcional)
 app.post("/api/upload", upload.single("file"), async (req,res)=>{
   try {
     const Bucket = need("S3_BUCKET");
@@ -137,19 +121,8 @@ app.post("/api/upload", upload.single("file"), async (req,res)=>{
   } catch (e) { res.status(500).json({ ok:false, where:"upload", message: String(e?.message || e) }); }
 });
 
-app.post("/api/presign-get", async (req,res)=>{
-  try {
-    const Bucket = need("S3_BUCKET");
-    const { key, expiresIn = 900 } = req.body || {};
-    if (!key) return res.status(400).json({ ok:false, where:"input", message:"key requerido" });
-    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket, Key: clean(key) }), { expiresIn });
-    res.json({ ok:true, url, expiresIn });
-  } catch (e) { res.status(500).json({ ok:false, where:"presign-get", message: String(e?.message || e) }); }
-});
-
 // PIN por álbum
 const pinKey = (album) => `meta/albums/${album}.pin`;
-
 app.post("/api/admin/album/pin/set", requireAdmin, async (req,res)=>{
   try{
     const { album, pin } = req.body || {};
@@ -161,7 +134,6 @@ app.post("/api/admin/album/pin/set", requireAdmin, async (req,res)=>{
     res.json({ ok:true });
   }catch(e){ res.status(500).json({ ok:false, where:"pin.set", message:String(e?.message||e) }); }
 });
-
 app.post("/api/album/pin/check", async (req,res)=>{
   try{
     const { album, pin } = req.body || {};
@@ -180,74 +152,62 @@ app.post("/api/album/pin/check", async (req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, where:"pin.check", message:String(e?.message||e) }); }
 });
 
+// Listar álbum
 app.get("/api/album/list", async (req,res)=>{
   try{
     const album = String(req.query.album||"").replace(/^\/+|\/+$/g,"");
     if(!album) return res.status(400).json({ ok:false, message:"album requerido" });
     const Bucket = need("S3_BUCKET");
     const Key = pinKey(album);
-    let hasPin = false;
-    try{ await s3.send(new HeadObjectCommand({ Bucket, Key })); hasPin = true; }catch{ hasPin = false; }
+    let hasPin=false; try{ await s3.send(new HeadObjectCommand({ Bucket, Key })); hasPin=true; }catch{}
     if (hasPin){
       const tok = req.headers["x-album-token"];
       const payload = verify(tok);
       if (!payload || payload.album !== album) return res.status(401).json({ ok:false, message:"token inválido/expirado" });
     }
-    const prefix = `albums/${album}/`;
-    const keys = await listAll(prefix);
-    const items = keys.map(k => ({ key:k, url:`/${k}` }));
-    res.json({ ok:true, album, items, protected: hasPin });
+    const keys = await listAll(`albums/${album}/`);
+    res.json({ ok:true, album, protected: hasPin, items: keys.map(k=>({key:k, url:`/${k}`})) });
   }catch(e){ res.status(500).json({ ok:false, where:"album.list", message:String(e?.message||e) }); }
 });
 
-// -------- ZIP por álbum o selección --------
+// ZIP (privado)
 app.post("/api/album/zip", async (req,res)=>{
   try{
     const { album, keys } = req.body || {};
     if(!album) return res.status(400).json({ ok:false, message:"album requerido" });
-    // validar token si está protegido
+    // validar token si protegido
     const Bucket = need("S3_BUCKET");
     const Key = pinKey(album);
-    let hasPin=false;
-    try{ await s3.send(new HeadObjectCommand({ Bucket, Key })); hasPin = true; }catch{ hasPin=false; }
+    let hasPin=false; try{ await s3.send(new HeadObjectCommand({ Bucket, Key })); hasPin=true; }catch{}
     if (hasPin){
       const tok = req.headers["x-album-token"];
       const payload = verify(tok);
       if (!payload || payload.album !== album) return res.status(401).json({ ok:false, message:"token inválido/expirado" });
     }
-
-    // determinar lista de archivos
     let list = Array.isArray(keys) && keys.length ? keys.map(clean) : await listAll(`albums/${album}/`);
     if (!list.length) return res.status(404).json({ ok:false, message:"No hay archivos" });
 
-    // headers de descarga
     const fname = `${album}-${Date.now()}.zip`;
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
-
-    // crear zip y hacer pipe al response
     const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.on("error", err => { try{ res.status(500).end(); }catch{} });
+    archive.on("error", () => { try{ res.status(500).end(); }catch{} });
     archive.pipe(res);
-
-    // ir anexando streams desde S3
     for (const k of list){
-      const cmd = new GetObjectCommand({ Bucket, Key: k });
-      const obj = await s3.send(cmd);
-      const stream = obj.Body; // Readable
-      const rel = k.split("/").slice(2).join("/"); // remover albums/<album>/
+      const obj = await s3.send(new GetObjectCommand({ Bucket, Key: k }));
+      const stream = obj.Body;
+      const rel = k.split("/").slice(2).join("/");
       archive.append(stream, { name: rel || k.split("/").pop() });
     }
     archive.finalize();
-  }catch(e){
-    res.status(500).json({ ok:false, where:"album.zip", message:String(e?.message||e) });
-  }
+  }catch(e){ res.status(500).json({ ok:false, where:"album.zip", message:String(e?.message||e) }); }
 });
 
-// Admin
-app.post("/api/admin/ping", requireAdmin, (req,res)=> res.json({ ok:true, admin:true }));
-app.post("/api/admin/item/delete", requireAdmin, async (req,res)=>{
+// Admin básico
+app.post("/api/admin/item/delete", async (req,res)=>{
   try{
+    const tok = req.headers["x-admin-token"];
+    if (String(tok) !== String(ADMIN_TOKEN)) return res.status(401).json({ ok:false, message:"Token inválido" });
     const { key } = req.body || {};
     if (!key) return res.status(400).json({ ok:false, message:"key requerido" });
     const ts = new Date().toISOString().replace(/[:.]/g,"-");
@@ -257,8 +217,10 @@ app.post("/api/admin/item/delete", requireAdmin, async (req,res)=>{
     return res.json({ ok:true, moved: toKey });
   }catch(e){ return res.status(500).json({ ok:false, where:"item.delete", message:String(e?.message||e) }); }
 });
-app.post("/api/admin/item/rename", requireAdmin, async (req,res)=>{
+app.post("/api/admin/item/rename", async (req,res)=>{
   try{
+    const tok = req.headers["x-admin-token"];
+    if (String(tok) !== String(ADMIN_TOKEN)) return res.status(401).json({ ok:false, message:"Token inválido" });
     const { from, to } = req.body || {};
     if (!from || !to) return res.status(400).json({ ok:false, message:"from y to requeridos" });
     const fromKey = clean(from); const toKey = clean(to);
@@ -266,36 +228,7 @@ app.post("/api/admin/item/rename", requireAdmin, async (req,res)=>{
     return res.json({ ok:true, from: fromKey, to: toKey });
   }catch(e){ return res.status(500).json({ ok:false, where:"item.rename", message:String(e?.message||e) }); }
 });
-app.post("/api/admin/album/trash", requireAdmin, async (req,res)=>{
-  try{
-    const { album } = req.body || {};
-    if (!album) return res.status(400).json({ ok:false, message:"album requerido" });
-    const prefix = `albums/${album.replace(/^\/+|\/+$/g,"")}/`;
-    const keys = await listAll(prefix);
-    if (!keys.length) return res.json({ ok:true, moved: 0 });
-    const ts = new Date().toISOString().replace(/[:.]/g,"-");
-    for (const k of keys){ await copyOne(k, `trash/${ts}/${k}`); }
-    await deleteMany(keys);
-    return res.json({ ok:true, moved: keys.length, prefix });
-  }catch(e){ return res.status(500).json({ ok:false, where:"album.trash", message:String(e?.message||e) }); }
-});
-app.post("/api/admin/album/restore", requireAdmin, async (req,res)=>{
-  try{
-    const { album } = req.body || {};
-    if (!album) return res.status(400).json({ ok:false, message:"album requerido" });
-    const trashKeys = await listAll(`trash/`);
-    const snaps = trashKeys
-      .filter(k => /trash\/[^/]+\/albums\//.test(k) && k.includes(`/albums/${album}/`))
-      .map(k => k.split("/").slice(0,2).join("/"));
-    const uniq = Array.from(new Set(snaps)).sort();
-    if (!uniq.length) return res.json({ ok:false, message:"no hay snapshot en trash para ese álbum" });
-    const lastSnap = uniq[uniq.length-1];
-    const snapPrefix = `${lastSnap}/albums/${album.replace(/^\/+|\/+$/g,"")}/`;
-    const files = trashKeys.filter(k => k.startsWith(snapPrefix));
-    for (const k of files){ const rel = k.substring(`${lastSnap}/`.length); await copyOne(k, rel); }
-    return res.json({ ok:true, restored: files.length, snapshot: lastSnap });
-  }catch(e){ return res.status(500).json({ ok:false, where:"album.restore", message:String(e?.message||e) }); }
-});
 
+// 404
 app.use((req,res)=> res.status(404).json({ ok:false, message:"Ruta no encontrada", path:req.path }));
-app.listen(PORT, ()=> console.log("Mixtli Relay + Admin + PIN + ZIP on", PORT));
+app.listen(PORT, ()=> console.log("Mixtli Relay PRIVATE on", PORT));
