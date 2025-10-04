@@ -1,6 +1,6 @@
 {
   "name": "mixtli-backend-fix",
-  "version": "1.0.2",
+  "version": "1.0.1",
   "type": "module",
   "scripts": {
     "start": "node server.js",
