@@ -1,4 +1,4 @@
-// server.js
+// server.js (Mixtli backend e2 vLZ) – listo para Render
 import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
@@ -201,7 +201,6 @@ app.get('/api/sign-get', async (req, res) => {
     const cmd = new GetObjectCommand({
       Bucket: S3_BUCKET,
       Key: key,
-      // permite cache mientras viva la URL firmada
       ResponseCacheControl: 'public,max-age=86400,immutable'
     });
     const url = await getSignedUrl(s3, cmd, { expiresIn: expires });
