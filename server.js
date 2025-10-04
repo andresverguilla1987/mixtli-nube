@@ -1,149 +1,153 @@
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
-import { S3Client, ListObjectsV2Command, PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, ListObjectsV2Command, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import path from "node:path";
 
-const app = express();
-app.use(express.json({ limit: "2mb" }));
-app.use(morgan("tiny"));
+// ====== ENV ======
+const {
+  S3_ENDPOINT,
+  S3_REGION = "us-east-1",
+  S3_BUCKET,
+  S3_ACCESS_KEY_ID,
+  S3_SECRET_ACCESS_KEY,
+  S3_FORCE_PATH_STYLE = "true",
+  PUBLIC_BASE, // e.g. https://x3j7.or2.idrivee2-60.com/mixtlinube3
+  ALLOWED_ORIGINS = "[]",
+  PORT = 8080,
+} = process.env;
 
-// CORS flexible
-const allowed = (() => {
-  try { return JSON.parse(process.env.ALLOWED_ORIGINS || "[]"); }
-  catch { return []; }
-})();
+// CORS allowlist (supports prefixes)
+let allowed = [];
+try { allowed = JSON.parse(ALLOWED_ORIGINS || "[]"); } catch { allowed = []; }
 
 const corsMw = cors({
   origin: (origin, cb) => {
-    // permitir llamadas server->server (Origin null) y preflights raros
-    if (!origin) return cb(null, true);
-    if (allowed.some(o => origin && origin.startsWith(o))) return cb(null, true);
+    if (!origin) return cb(null, true); // allow server->server and some preflights
+    if (allowed.some(o => origin.startsWith(o))) return cb(null, true);
     return cb(new Error(`Origin not allowed: ${origin}`));
   },
-  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type", "x-album-token"],
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: ["Content-Type","x-album-token"],
   credentials: false,
 });
-app.use(corsMw);
-app.options("*", corsMw);
 
-// Health / root
-app.get("/", (_req, res) => res.status(200).send("Mixtli API OK"));
-
-// S3/E2 client
-const REQUIRED = ["E2_ENDPOINT","E2_ACCESS_KEY_ID","E2_SECRET_ACCESS_KEY","E2_BUCKET"];
-const missing = REQUIRED.filter(k => !process.env[k]);
-if (missing.length) {
-  console.warn("⚠️  Faltan variables E2:", missing.join(", "));
-}
-
+// ====== S3 client (IDrive e2 compatible) ======
 const s3 = new S3Client({
-  region: process.env.E2_REGION || "us-east-1",
-  endpoint: process.env.E2_ENDPOINT,      // ej: https://s3.us-west-1.idrivee2-21.com
-  forcePathStyle: true,
+  region: S3_REGION,
+  endpoint: S3_ENDPOINT, // https://x3j7.or2.idrivee2-60.com
+  forcePathStyle: String(S3_FORCE_PATH_STYLE).toLowerCase() === "true",
   credentials: {
-    accessKeyId: process.env.E2_ACCESS_KEY_ID || "",
-    secretAccessKey: process.env.E2_SECRET_ACCESS_KEY || "",
-  }
+    accessKeyId: S3_ACCESS_KEY_ID,
+    secretAccessKey: S3_SECRET_ACCESS_KEY,
+  },
 });
 
-const BUCKET = process.env.E2_BUCKET || "";
+// ====== App ======
+const app = express();
+app.use(corsMw);
+app.options("*", corsMw);
+app.use(express.json({ limit: "20mb" }));
+app.use(morgan("tiny"));
 
 // Helpers
-const ensureAlbumPrefix = (album) => {
-  if (!album) album = "personal";
-  // guardamos dentro de albums/<album>/
-  return `albums/${album}/`;
-};
+const exts = [".jpg",".jpeg",".png",".webp",".gif",".bmp",".avif"];
+const isImage = (key) => exts.includes(path.extname(key).toLowerCase());
 
-// --- LIST ----
-// Soporta /api/album/list?album=ALBUM  y /api/list?album=ALBUM
-const listHandler = async (req, res) => {
+function toPublicUrl(key) {
+  if (!PUBLIC_BASE) return null;
+  const base = PUBLIC_BASE.replace(/\/+$/,"");
+  return `${base}/${key.replace(/^\/+/,"")}`;
+}
+
+// Health
+app.get("/salud", (_req,res)=> res.json({ok:true, ts: Date.now()}));
+app.get("/api/salud", (_req,res)=> res.json({ok:true, ts: Date.now()}));
+
+// Diag
+app.get("/api/diag", async (req,res)=>{
+  res.json({
+    ok:true,
+    routes:["GET /api/list","GET /api/album/list","POST /api/presign","/api/diag","/api/salud"],
+    bucket: !!S3_BUCKET,
+    endpoint: !!S3_ENDPOINT,
+    publicBase: !!PUBLIC_BASE,
+    allowedOrigins: allowed,
+  });
+});
+
+// List (accepts both /api/list and /api/album/list)
+async function listHandler(req, res) {
   try {
     const album = String(req.query.album || "personal");
-    const Prefix = ensureAlbumPrefix(album);
-    const list = await s3.send(new ListObjectsV2Command({
-      Bucket: BUCKET,
-      Prefix,
-    }));
-    const items = (list.Contents || [])
-      .filter(o => !o.Key.endsWith("/")) // no carpetas
-      .map(o => ({
-        key: o.Key,
-        size: o.Size,
-        lastModified: o.LastModified,
-        // thumb convención: thumbs/<hash>.jpg (si existe)
-        thumb: null,
-        href: null,
+    const prefixes = [
+      `${album}/`,
+      `albums/${album}/`,
+    ];
+
+    let items = [];
+    for (const Prefix of prefixes) {
+      const out = await s3.send(new ListObjectsV2Command({
+        Bucket: S3_BUCKET,
+        Prefix,
       }));
-    return res.json({ ok: true, items });
+      const list = (out.Contents || [])
+        .map(obj => obj.Key)
+        .filter(k => k && isImage(k))
+        .map(k => {
+          const name = path.basename(k);
+          const url = toPublicUrl(k);
+          // Guess thumb path
+          const baseDir = path.posix.join("thumbs", path.posix.dirname(k));
+          const thumb = toPublicUrl(path.posix.join(baseDir, name));
+          return ({ key: k, name, url, thumb });
+        });
+      items = items.concat(list);
+    }
+
+    // Dedup keys
+    const map = new Map();
+    for (const it of items) map.set(it.key, it);
+    const final = Array.from(map.values());
+
+    res.json({ ok:true, album, count: final.length, files: final });
   } catch (err) {
     console.error("list error", err);
-    res.status(500).json({ ok:false, message: String(err) });
+    res.status(500).json({ ok:false, message:String(err?.message||err) });
   }
-};
+}
 
 app.get("/api/list", listHandler);
 app.get("/api/album/list", listHandler);
 
-// --- PRESIGN PUT ----
-// POST /api/presign { key, contentType }  -> { ok, url, headers }
-app.post("/api/presign", async (req, res) => {
+// Presign (PUT)
+app.post("/api/presign", async (req,res)=>{
   try {
-    const { key, contentType } = req.body || {};
-    if (!key) return res.status(400).json({ ok:false, message:"key requerida" });
-    const cmd = new PutObjectCommand({
-      Bucket: BUCKET,
+    let { key, album, filename, contentType } = req.body || {};
+    album = album || "uploads";
+    if (!key) {
+      if (!filename) throw new Error("filename o key requerido");
+      key = `${album}/${Date.now()}-${filename}`;
+    }
+    const command = new PutObjectCommand({
+      Bucket: S3_BUCKET,
       Key: key,
       ContentType: contentType || "application/octet-stream",
     });
-    const url = await getSignedUrl(s3, cmd, { expiresIn: 60 });
-    res.json({ ok: true, url, headers: { "Content-Type": contentType || "application/octet-stream" } });
+    const url = await getSignedUrl(s3, command, { expiresIn: 900 }); // 15 min
+    res.json({ ok:true, method:"PUT", url, key });
   } catch (err) {
     console.error("presign error", err);
-    res.status(500).json({ ok:false, message: String(err) });
+    res.status(400).json({ ok:false, message:String(err?.message||err) });
   }
 });
 
-// GET variante: /api/presign-get?key=...&contentType=image/jpeg
-app.get("/api/presign-get", async (req, res) => {
-  try {
-    const { key, contentType } = req.query || {};
-    if (!key) return res.status(400).json({ ok:false, message:"key requerida" });
-    const cmd = new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: key,
-      ContentType: contentType || "application/octet-stream",
-    });
-    const url = await getSignedUrl(s3, cmd, { expiresIn: 60 });
-    res.json({ ok: true, url, headers: { "Content-Type": contentType || "application/octet-stream" } });
-  } catch (err) {
-    console.error("presign-get error", err);
-    res.status(500).json({ ok:false, message: String(err) });
-  }
+// 404 guard
+app.use((req,res)=>{
+  res.status(404).json({ ok:false, message:"Ruta no encontrada", path:req.path });
 });
 
-// --- DIAG ---
-app.get("/api/diag", async (req, res) => {
-  try {
-    const head = await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: "__healthcheck__.txt" })
-    ).catch(() => null);
-    res.json({
-      ok: true,
-      env: {
-        endpoint: process.env.E2_ENDPOINT ? "ok" : "missing",
-        bucket: BUCKET || "missing",
-        region: process.env.E2_REGION || "us-east-1",
-        allowedOrigins: allowed,
-      },
-      storageOk: !!head || "unknown",
-      ts: Date.now(),
-    });
-  } catch (e) {
-    res.json({ ok: true, env: { error: String(e) }, ts: Date.now() });
-  }
+app.listen(Number(PORT), ()=> {
+  console.log(`Mixtli API (presign) on ${PORT}`);
 });
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Mixtli API (presign+list) on ${PORT}`));
