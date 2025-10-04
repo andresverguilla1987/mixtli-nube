@@ -1,153 +1,133 @@
-import express from "express";
-import cors from "cors";
-import morgan from "morgan";
-import { S3Client, ListObjectsV2Command, PutObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import path from "node:path";
+import 'dotenv/config';
+import express from 'express';
+import morgan from 'morgan';
+import cors from 'cors';
+import { S3Client, ListObjectsV2Command, HeadBucketCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
-// ====== ENV ======
-const {
-  S3_ENDPOINT,
-  S3_REGION = "us-east-1",
-  S3_BUCKET,
-  S3_ACCESS_KEY_ID,
-  S3_SECRET_ACCESS_KEY,
-  S3_FORCE_PATH_STYLE = "true",
-  PUBLIC_BASE, // e.g. https://x3j7.or2.idrivee2-60.com/mixtlinube3
-  ALLOWED_ORIGINS = "[]",
-  PORT = 8080,
-} = process.env;
+// ---- CONFIG ----
+const REQUIRED = ['S3_ENDPOINT','S3_BUCKET','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY'];
+const missing = REQUIRED.filter(k => !process.env[k] || String(process.env[k]).trim()==='');
+if (missing.length) {
+  console.warn('[BOOT] Missing env:', missing.join(', '));
+}
 
-// CORS allowlist (supports prefixes)
-let allowed = [];
-try { allowed = JSON.parse(ALLOWED_ORIGINS || "[]"); } catch { allowed = []; }
+const S3_ENDPOINT = process.env.S3_ENDPOINT; // e.g. https://<accountid>.r2.cloudflarestorage.com
+const S3_BUCKET = process.env.S3_BUCKET;
+const S3_REGION = process.env.S3_REGION || 'auto';
+const FORCE_PATH_STYLE = String(process.env.S3_FORCE_PATH_STYLE||'true').toLowerCase()!=='false';
 
-const corsMw = cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // allow server->server and some preflights
-    if (allowed.some(o => origin.startsWith(o))) return cb(null, true);
-    return cb(new Error(`Origin not allowed: ${origin}`));
-  },
-  methods: ["GET","POST","OPTIONS"],
-  allowedHeaders: ["Content-Type","x-album-token"],
-  credentials: false,
-});
-
-// ====== S3 client (IDrive e2 compatible) ======
+// Important: use HOSTNAME endpoint (no bucket suffix). Do NOT use raw IP.
+// R2 requires SNI; connecting to an IP will fail TLS.
 const s3 = new S3Client({
   region: S3_REGION,
-  endpoint: S3_ENDPOINT, // https://x3j7.or2.idrivee2-60.com
-  forcePathStyle: String(S3_FORCE_PATH_STYLE).toLowerCase() === "true",
+  endpoint: S3_ENDPOINT,
+  forcePathStyle: FORCE_PATH_STYLE,
   credentials: {
-    accessKeyId: S3_ACCESS_KEY_ID,
-    secretAccessKey: S3_SECRET_ACCESS_KEY,
-  },
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY
+  }
 });
 
-// ====== App ======
 const app = express();
-app.use(corsMw);
-app.options("*", corsMw);
-app.use(express.json({ limit: "20mb" }));
-app.use(morgan("tiny"));
+app.use(cors({
+  origin: (origin, cb) => {
+    // Simple CORS allow-list using comma-separated env ALLOWED_ORIGINS
+    const allowList = (process.env.ALLOWED_ORIGINS||'').split(',').map(s=>s.trim()).filter(Boolean);
+    if (!origin || allowList.length===0 || allowList.includes(origin)) return cb(null, true);
+    return cb(new Error('CORS not allowed for '+origin));
+  },
+  credentials: false
+}));
+app.use(express.json({limit: '2mb'}));
+app.use(morgan('dev'));
 
-// Helpers
-const exts = [".jpg",".jpeg",".png",".webp",".gif",".bmp",".avif"];
-const isImage = (key) => exts.includes(path.extname(key).toLowerCase());
-
-function toPublicUrl(key) {
-  if (!PUBLIC_BASE) return null;
-  const base = PUBLIC_BASE.replace(/\/+$/,"");
-  return `${base}/${key.replace(/^\/+/,"")}`;
-}
-
-// Health
-app.get("/salud", (_req,res)=> res.json({ok:true, ts: Date.now()}));
-app.get("/api/salud", (_req,res)=> res.json({ok:true, ts: Date.now()}));
-
-// Diag
-app.get("/api/diag", async (req,res)=>{
-  res.json({
-    ok:true,
-    routes:["GET /api/list","GET /api/album/list","POST /api/presign","/api/diag","/api/salud"],
-    bucket: !!S3_BUCKET,
-    endpoint: !!S3_ENDPOINT,
-    publicBase: !!PUBLIC_BASE,
-    allowedOrigins: allowed,
-  });
+// ---- HEALTH ----
+app.get(['/salud','/api/health','/healthz'], async (req,res) => {
+  try {
+    await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }));
+    res.json({ ok:true, storage:'up', bucket:S3_BUCKET });
+  } catch (e) {
+    res.status(200).json({ ok:true, storage:'down', bucket:S3_BUCKET, error: e?.name || 'unknown' });
+  }
 });
 
-// List (accepts both /api/list and /api/album/list)
-async function listHandler(req, res) {
+// ---- LIST ----
+app.get(['/api/list','/api/album/list'], async (req, res) => {
+  const album = String(req.query.album || '').trim() || 'personal';
+  const Prefix = album.endsWith('/') ? album : album + '/';
   try {
-    const album = String(req.query.album || "personal");
-    const prefixes = [
-      `${album}/`,
-      `albums/${album}/`,
-    ];
-
-    let items = [];
-    for (const Prefix of prefixes) {
-      const out = await s3.send(new ListObjectsV2Command({
-        Bucket: S3_BUCKET,
-        Prefix,
-      }));
-      const list = (out.Contents || [])
-        .map(obj => obj.Key)
-        .filter(k => k && isImage(k))
-        .map(k => {
-          const name = path.basename(k);
-          const url = toPublicUrl(k);
-          // Guess thumb path
-          const baseDir = path.posix.join("thumbs", path.posix.dirname(k));
-          const thumb = toPublicUrl(path.posix.join(baseDir, name));
-          return ({ key: k, name, url, thumb });
-        });
-      items = items.concat(list);
-    }
-
-    // Dedup keys
-    const map = new Map();
-    for (const it of items) map.set(it.key, it);
-    const final = Array.from(map.values());
-
-    res.json({ ok:true, album, count: final.length, files: final });
-  } catch (err) {
-    console.error("list error", err);
-    res.status(500).json({ ok:false, message:String(err?.message||err) });
+    const out = await s3.send(new ListObjectsV2Command({ Bucket: S3_BUCKET, Prefix }));
+    const items = (out.Contents||[]).map(o => ({
+      key: o.Key,
+      size: o.Size,
+      etag: o.ETag,
+      lastModified: o.LastModified
+    }));
+    res.json({ ok:true, album, items });
+  } catch (e) {
+    console.error('list error', e);
+    res.status(502).json({ ok:false, code:'STORAGE_DOWN', message:'Error consultando almacenamiento', detail: e?.message });
   }
-}
+});
 
-app.get("/api/list", listHandler);
-app.get("/api/album/list", listHandler);
-
-// Presign (PUT)
-app.post("/api/presign", async (req,res)=>{
+// ---- PRESIGN (single) ----
+app.post('/api/presign', async (req, res) => {
   try {
-    let { key, album, filename, contentType } = req.body || {};
-    album = album || "uploads";
-    if (!key) {
-      if (!filename) throw new Error("filename o key requerido");
-      key = `${album}/${Date.now()}-${filename}`;
+    const { filename, key, contentType, album } = req.body || {};
+    const cleanName = (filename||key||'').toString().trim();
+    if (!cleanName) {
+      // Match prior logs: "filename o key requerido"
+      return res.status(400).json({ ok:false, message:'filename o key requerido' });
     }
-    const command = new PutObjectCommand({
+    const folder = (album||'personal').toString().trim() || 'personal';
+    const Key = (folder.endsWith('/')?folder:(folder+'/')) + cleanName;
+    const putCmd = new PutObjectCommand({
       Bucket: S3_BUCKET,
-      Key: key,
-      ContentType: contentType || "application/octet-stream",
+      Key,
+      ContentType: contentType || 'application/octet-stream'
     });
-    const url = await getSignedUrl(s3, command, { expiresIn: 900 }); // 15 min
-    res.json({ ok:true, method:"PUT", url, key });
-  } catch (err) {
-    console.error("presign error", err);
-    res.status(400).json({ ok:false, message:String(err?.message||err) });
+    const url = await getSignedUrl(s3, putCmd, { expiresIn: 60*5 }); // 5 min
+    res.json({ ok:true, url, key: Key, expiresIn: 300 });
+  } catch (e) {
+    console.error('presign error', e);
+    res.status(500).json({ ok:false, message:'No se pudo presignar', detail: e?.message });
   }
 });
 
-// 404 guard
-app.use((req,res)=>{
-  res.status(404).json({ ok:false, message:"Ruta no encontrada", path:req.path });
+// ---- PRESIGN BATCH (optional) ----
+app.post('/api/presign-batch', async (req, res) => {
+  try {
+    const { files, album } = req.body || {};
+    if (!Array.isArray(files) || files.length===0) {
+      return res.status(400).json({ ok:false, message:'files[] requerido' });
+    }
+    const folder = (album||'personal').toString().trim() || 'personal';
+    const results = [];
+    for (const f of files) {
+      const name = (f?.filename||f?.key||'').toString().trim();
+      const ctype = (f?.contentType)||'application/octet-stream';
+      if (!name) {
+        results.push({ ok:false, error:'filename o key requerido' });
+        continue;
+      }
+      const Key = (folder.endsWith('/')?folder:(folder+'/')) + name;
+      const putCmd = new PutObjectCommand({ Bucket:S3_BUCKET, Key, ContentType: ctype });
+      const url = await getSignedUrl(s3, putCmd, { expiresIn: 60*5 });
+      results.push({ ok:true, url, key: Key, expiresIn:300 });
+    }
+    res.json({ ok:true, results });
+  } catch (e) {
+    console.error('presign-batch error', e);
+    res.status(500).json({ ok:false, message:'No se pudo presignar batch', detail: e?.message });
+  }
 });
 
-app.listen(Number(PORT), ()=> {
-  console.log(`Mixtli API (presign) on ${PORT}`);
+// ---- ROOT ----
+app.get('/', (req,res)=>res.json({ ok:true, name:'Mixtli backend fix', time:new Date().toISOString() }));
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, ()=>{
+  console.log('Mixtli backend fix on :'+PORT);
+  console.log('[Tip] Ensure S3_ENDPOINT is a HOSTNAME (no bucket, no IP). Example: https://<accountid>.r2.cloudflarestorage.com');
 });
