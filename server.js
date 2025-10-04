@@ -1,8 +1,10 @@
-// server.js (Mixtli backend e2 vLZ) – listo para Render
+// server.js (Mixtli backend e2 vLZ-fast) – Render + rendimiento
 import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
 import cors from 'cors';
+import https from 'https';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import {
   S3Client,
   ListObjectsV2Command,
@@ -22,11 +24,25 @@ if (!S3_ENDPOINT || !S3_BUCKET) {
   console.warn('[WARN] Faltan variables S3_ENDPOINT y/o S3_BUCKET');
 }
 
+// ====== HTTP Agent / Handler para mejorar rendimiento ======
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 15000,
+  maxSockets: 128,      // concurrencia alta y estable
+  maxFreeSockets: 64
+});
+
 // ====== S3 CLIENT (e2) ======
 const s3 = new S3Client({
   region: S3_REGION,
   endpoint: S3_ENDPOINT,
   forcePathStyle: FORCE_PATH_STYLE,
+  maxAttempts: 3, // reintentos rápidos ante fallos intermitentes
+  requestHandler: new NodeHttpHandler({
+    httpsAgent,
+    connectionTimeout: 2000, // ms para conectar
+    socketTimeout: 15000     // ms por operación
+  }),
   credentials: {
     accessKeyId: process.env.S3_ACCESS_KEY_ID,
     secretAccessKey: process.env.S3_SECRET_ACCESS_KEY
@@ -67,7 +83,9 @@ app.use(cors({
     if (allowRegexes.some(rx => rx.test(origin))) return cb(null, true);
     return cb(new Error('CORS not allowed for ' + origin));
   },
-  credentials: false
+  credentials: false,
+  optionsSuccessStatus: 204,
+  maxAge: 86400 // cachea preflight 24h en el navegador
 }));
 app.options('*', cors());
 
@@ -156,7 +174,10 @@ app.post('/api/presign', async (req, res) => {
     const putCmd = new PutObjectCommand({
       Bucket: S3_BUCKET,
       Key,
-      ContentType: contentType || 'application/octet-stream'
+      ContentType: contentType || 'application/octet-stream',
+      CacheControl: /image|video|audio/.test((contentType||'').toLowerCase())
+        ? 'public,max-age=31536000,immutable'
+        : undefined
     });
     const url = await getSignedUrl(s3, putCmd, { expiresIn: 60 * 5 });
     res.json({ ok: true, url, key: Key, expiresIn: 300 });
@@ -180,7 +201,14 @@ app.post('/api/presign-batch', async (req, res) => {
       const ctype = (f?.contentType) || 'application/octet-stream';
       if (!name) { results.push({ ok: false, error: 'filename o key requerido' }); continue; }
       const Key = (folder.endsWith('/') ? folder : (folder + '/')) + name;
-      const putCmd = new PutObjectCommand({ Bucket: S3_BUCKET, Key, ContentType: ctype });
+      const putCmd = new PutObjectCommand({
+        Bucket: S3_BUCKET,
+        Key,
+        ContentType: ctype,
+        CacheControl: /image|video|audio/.test((ctype||'').toLowerCase())
+          ? 'public,max-age=31536000,immutable'
+          : undefined
+      });
       const url = await getSignedUrl(s3, putCmd, { expiresIn: 60 * 5 });
       results.push({ ok: true, url, key: Key, expiresIn: 300 });
     }
@@ -205,6 +233,7 @@ app.get('/api/sign-get', async (req, res) => {
     });
     const url = await getSignedUrl(s3, cmd, { expiresIn: expires });
 
+    res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=120');
     res.json({ ok: true, url });
   } catch (e) {
     console.error('sign-get error', e);
@@ -233,6 +262,7 @@ app.post('/api/sign-get-batch', async (req, res) => {
       }
     }));
 
+    res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=120');
     res.json({ ok: true, results });
   } catch (e) {
     console.error('sign-get-batch error', e);
@@ -241,7 +271,7 @@ app.post('/api/sign-get-batch', async (req, res) => {
 });
 
 // Raíz
-app.get('/', (_req, res) => res.json({ ok: true, name: 'Mixtli backend (e2) vLZ', time: new Date().toISOString() }));
+app.get('/', (_req, res) => res.json({ ok: true, name: 'Mixtli backend (e2) vLZ-fast', time: new Date().toISOString() }));
 
 // ====== START ======
 const PORT = process.env.PORT || 8080;
