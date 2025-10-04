@@ -13,6 +13,7 @@ import {
   HeadBucketCommand,
   PutObjectCommand,
   GetObjectCommand,
+  DeleteObjectCommand,
   DeleteObjectsCommand
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -22,7 +23,7 @@ const S3_ENDPOINT = process.env.S3_ENDPOINT;             // p.ej. https://x3j7.o
 const S3_BUCKET   = process.env.S3_BUCKET;               // p.ej. 1mixtlinube3
 const S3_REGION   = process.env.S3_REGION || 'us-east-1';
 const FORCE_PATH_STYLE = String(process.env.S3_FORCE_PATH_STYLE ?? 'true').toLowerCase() !== 'false'; // e2 => true
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';       // para borrar
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';       // para borrar (opcional pero recomendado)
 
 if (!S3_ENDPOINT || !S3_BUCKET) {
   console.warn('[WARN] Faltan S3_ENDPOINT y/o S3_BUCKET');
@@ -213,19 +214,31 @@ app.post('/api/sign-get-batch', async (req, res) => {
   }
 });
 
-// Borrado (batch) – requiere header X-Admin-Token
-app.post('/api/delete-batch', async (req, res) => {
-  if (!ADMIN_TOKEN) return res.status(403).json({ ok:false, message:'ADMIN_TOKEN no configurado' });
-  const tok = req.get('X-Admin-Token') || '';
-  if (tok !== ADMIN_TOKEN) return res.status(401).json({ ok:false, message:'Token inválido' });
-
-  const keys = Array.isArray(req.body?.keys) ? req.body.keys : [];
-  if (!keys.length) return res.status(400).json({ ok:false, message:'keys[] requerido' });
-
+// Eliminar un objeto (simple POST)
+app.post('/api/delete', async (req, res) => {
   try {
-    const Objects = keys.map(Key => ({ Key:String(Key) }));
-    const out = await s3.send(new DeleteObjectsCommand({ Bucket: S3_BUCKET, Delete: { Objects, Quiet: true }}));
-    res.json({ ok:true, results:[{ deleted:(out?.Deleted||[]).map(d=>d.Key) }] });
+    const key = String(req.body?.key || '').trim();
+    if (!key) return res.status(400).json({ ok:false, message:'key requerido' });
+    await s3.send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: key }));
+    res.json({ ok:true, deleted: key });
+  } catch (e) {
+    console.error('delete error', e);
+    res.status(500).json({ ok:false, message:'delete failed', detail: e?.message });
+  }
+});
+
+// Eliminar varios (protección opcional con token)
+app.post('/api/delete-batch', async (req, res) => {
+  if (ADMIN_TOKEN) {
+    const tok = req.get('X-Admin-Token') || '';
+    if (tok !== ADMIN_TOKEN) return res.status(401).json({ ok:false, message:'Token inválido' });
+  }
+  try {
+    const keys = Array.isArray(req.body?.keys) ? req.body.keys.filter(Boolean) : [];
+    if (!keys.length) return res.status(400).json({ ok:false, message:'keys[] requerido' });
+    const Objects = keys.map(Key => ({ Key: String(Key) }));
+    const out = await s3.send(new DeleteObjectsCommand({ Bucket: S3_BUCKET, Delete: { Objects, Quiet: true } }));
+    res.json({ ok:true, results:[{ deleted:(out?.Deleted||[]).map(d=>d.Key), errors: out?.Errors||[] }] });
   } catch (e) {
     console.error('delete-batch error', e);
     res.status(500).json({ ok:false, message:'delete-batch failed', detail:e?.message });
