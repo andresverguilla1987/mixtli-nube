@@ -1,6 +1,4 @@
-// server.js — Mixtli backend fix v3 (iDrive e2 listo)
-// Pega TAL CUAL y redeploya en Render.
-
+// server.js
 import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
@@ -9,67 +7,59 @@ import {
   S3Client,
   ListObjectsV2Command,
   HeadBucketCommand,
-  PutObjectCommand
+  PutObjectCommand,
+  GetObjectCommand
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
-/* ====== ENV esperadas (iDrive e2) ======
-   S3_ENDPOINT=https://x3j7.or2.idrivee2-60.com
-   S3_BUCKET=1mixtlinube3
-   S3_REGION=us-east-1
-   S3_FORCE_PATH_STYLE=true
-   S3_ACCESS_KEY_ID=...
-   S3_SECRET_ACCESS_KEY=...
-   ALLOWED_ORIGINS=https://*.netlify.app,https://mixtli-nube.onrender.com
-======================================== */
+// ====== ENV (iDrive e2 mapeado a S3_*) ======
+const S3_ENDPOINT = process.env.S3_ENDPOINT;                   // p.ej. https://x3j7.or2.idrivee2-60.com  (SIN /bucket)
+const S3_BUCKET   = process.env.S3_BUCKET;                     // p.ej. 1mixtlinube3
+const S3_REGION   = process.env.S3_REGION || 'us-east-1';      // e2 suele ir con us-east-1
+const FORCE_PATH_STYLE = String(process.env.S3_FORCE_PATH_STYLE ?? 'true').toLowerCase() !== 'false'; // e2 requiere true
 
-const S3_ENDPOINT = process.env.S3_ENDPOINT;
-const S3_BUCKET = process.env.S3_BUCKET;
-const S3_REGION = process.env.S3_REGION || 'us-east-1';
-const FORCE_PATH_STYLE = String(process.env.S3_FORCE_PATH_STYLE ?? 'true').toLowerCase() !== 'false';
+if (!S3_ENDPOINT || !S3_BUCKET) {
+  console.warn('[WARN] Faltan variables S3_ENDPOINT y/o S3_BUCKET');
+}
 
+// ====== S3 CLIENT (e2) ======
 const s3 = new S3Client({
   region: S3_REGION,
-  endpoint: S3_ENDPOINT,          // e2: hostname (sin /bucket, sin IP)
-  forcePathStyle: FORCE_PATH_STYLE, // e2 requiere path-style
+  endpoint: S3_ENDPOINT,
+  forcePathStyle: FORCE_PATH_STYLE,
   credentials: {
     accessKeyId: process.env.S3_ACCESS_KEY_ID,
     secretAccessKey: process.env.S3_SECRET_ACCESS_KEY
   }
 });
 
-function errInfo(e) {
-  return {
-    name: e?.name,
-    message: e?.message,
-    http: e?.$metadata?.httpStatusCode,
-    $metadata: e?.$metadata || null
-  };
-}
-
+// ====== APP/CORS ======
 const app = express();
+app.use(express.json({ limit: '2mb' }));
+app.use(morgan('dev'));
 
-/* ---------- CORS (soporta comodines) ---------- */
-const allowListRaw = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+// ALLOWED_ORIGINS puede venir como JSON '["https://foo", "https://*.netlify.app"]' o CSV
+function parseAllowedOrigins(src) {
+  if (!src) return [];
+  const t = src.trim();
+  if (t.startsWith('[')) {
+    try { return JSON.parse(t); } catch { /* fallthrough */ }
+  }
+  return t.split(',').map(s => s.trim()).filter(Boolean);
+}
+const allowListRaw = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
 
+// Convierte wildcard *.dominio a RegExp
 const allowRegexes = allowListRaw
   .filter(p => p.includes('*'))
-  .map(p => new RegExp('^' + p
-    .replace(/[.+?^${}()|[\]\\]/g, '\\$&') // escapar regex
-    .replace(/\\\*/g, '.*')               // * => .*
-  + '$'));
-
+  .map(p => new RegExp('^' + p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace('\\*', '.*') + '$'));
 const allowListExact = new Set(allowListRaw.filter(p => !p.includes('*')));
 
-console.log('[CORS] allow =', allowListRaw.length ? allowListRaw : '(empty → allow all)');
+console.log('[CORS] allow =', allowListRaw.length ? allowListRaw : '(vacío -> allow all)');
 app.use((req, _res, next) => {
   if (req.headers.origin) console.log('[CORS] Origin:', req.headers.origin);
   next();
 });
-
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || allowListRaw.length === 0 || allowListRaw.includes('*')) return cb(null, true);
@@ -81,74 +71,63 @@ app.use(cors({
 }));
 app.options('*', cors());
 
-/* ---------- Middlewares ---------- */
-app.use(express.json({ limit: '5mb' }));
-app.use(morgan('dev'));
+// ====== RUTAS ======
 
-/* ---------- Health & Diagnóstico ---------- */
-app.get(['/salud','/api/health','/healthz'], async (_req, res) => {
+// Salud simple: HEAD bucket
+app.get(['/salud', '/api/health', '/healthz'], async (_req, res) => {
   try {
-    const r = await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }));
-    res.json({ ok: true, storage: 'up', bucket: S3_BUCKET, code: r?.$metadata?.httpStatusCode || 200 });
+    await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }));
+    res.json({ ok: true, storage: 'up', bucket: S3_BUCKET });
   } catch (e) {
-    res.json({ ok: true, storage: 'down', bucket: S3_BUCKET, error: errInfo(e) });
+    res.status(200).json({
+      ok: true, storage: 'down', bucket: S3_BUCKET,
+      error: e?.name || 'unknown', detail: e?.message
+    });
   }
 });
 
+// Diagnóstico extendido
 app.get('/api/diag', async (_req, res) => {
   const diag = {
     s3: { endpoint: S3_ENDPOINT, bucket: S3_BUCKET, region: S3_REGION, forcePathStyle: FORCE_PATH_STYLE },
-    allowed_origins: allowListRaw.length ? allowListRaw : '(empty → allow all)'
+    allowed_origins: allowListRaw
   };
   try {
     await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }));
     diag.headBucket = { ok: true };
   } catch (e) {
-    diag.headBucket = { ok: false, error: errInfo(e) };
+    diag.headBucket = {
+      ok: false,
+      error: { name: e?.name || 'unknown', message: e?.message, http: e?.$metadata?.httpStatusCode, $metadata: e?.$metadata }
+    };
   }
   res.json({ ok: true, diag });
 });
 
-/* ---------- Self-test upload (servidor → e2) ---------- */
-app.post('/api/self-test-upload', async (req, res) => {
-  try {
-    const album = (req.body?.album || 'personal').toString().trim() || 'personal';
-    const key = (album.endsWith('/') ? album : album + '/') + '__diag_' + Date.now() + '.txt';
-    const put = await s3.send(new PutObjectCommand({
-      Bucket: S3_BUCKET, Key: key, Body: 'ok', ContentType: 'text/plain'
-    }));
-    res.json({ ok: true, key, code: put?.$metadata?.httpStatusCode || 200 });
-  } catch (e) {
-    res.status(502).json({ ok: false, message: 'Self test failed', error: errInfo(e) });
-  }
-});
-
-/* ---------- Listado ---------- */
-app.get(['/api/list','/api/album/list'], async (req, res) => {
+// Listar objetos por álbum (prefijo)
+app.get(['/api/list', '/api/album/list'], async (req, res) => {
   const album = String(req.query.album || '').trim() || 'personal';
   const Prefix = album.endsWith('/') ? album : album + '/';
   try {
     const out = await s3.send(new ListObjectsV2Command({ Bucket: S3_BUCKET, Prefix }));
     const items = (out.Contents || []).map(o => ({
-      key: o.Key,
-      size: o.Size,
-      etag: o.ETag,
-      lastModified: o.LastModified
+      key: o.Key, size: o.Size, etag: o.ETag, lastModified: o.LastModified
     }));
     res.json({ ok: true, album, items });
   } catch (e) {
     console.error('list error', e);
-    res.status(502).json({ ok: false, code: 'STORAGE_DOWN', message: 'Error consultando almacenamiento', detail: errInfo(e) });
+    res.status(502).json({
+      ok: false, code: 'STORAGE_DOWN', message: 'Error consultando almacenamiento', detail: e?.message
+    });
   }
 });
 
-/* ---------- Presign PUT (uno) ---------- */
+// Pre-firma de subida (PUT) para un archivo
 app.post('/api/presign', async (req, res) => {
   try {
     const { filename, key, contentType, album } = req.body || {};
     const cleanName = (filename || key || '').toString().trim();
     if (!cleanName) return res.status(400).json({ ok: false, message: 'filename o key requerido' });
-
     const folder = (album || 'personal').toString().trim() || 'personal';
     const Key = (folder.endsWith('/') ? folder : (folder + '/')) + cleanName;
 
@@ -161,11 +140,11 @@ app.post('/api/presign', async (req, res) => {
     res.json({ ok: true, url, key: Key, expiresIn: 300 });
   } catch (e) {
     console.error('presign error', e);
-    res.status(500).json({ ok: false, message: 'No se pudo presignar', detail: errInfo(e) });
+    res.status(500).json({ ok: false, message: 'No se pudo presignar', detail: e?.message });
   }
 });
 
-/* ---------- Presign PUT (batch) ---------- */
+// Pre-firma de subida (PUT) en batch
 app.post('/api/presign-batch', async (req, res) => {
   try {
     const { files, album } = req.body || {};
@@ -186,20 +165,33 @@ app.post('/api/presign-batch', async (req, res) => {
     res.json({ ok: true, results });
   } catch (e) {
     console.error('presign-batch error', e);
-    res.status(500).json({ ok: false, message: 'No se pudo presignar batch', detail: errInfo(e) });
+    res.status(500).json({ ok: false, message: 'No se pudo presignar batch', detail: e?.message });
   }
 });
 
-/* ---------- Root ---------- */
-app.get('/', (_req, res) => res.json({
-  ok: true,
-  name: 'Mixtli backend fix v3 (e2)',
-  time: new Date().toISOString()
-}));
+// --- firma de lectura para previews/miniaturas ---
+app.get('/api/sign-get', async (req, res) => {
+  try {
+    const key = String(req.query.key || '').trim();
+    const expires = Math.min(900, Math.max(30, parseInt(req.query.expires || '300', 10)));
+    if (!key) return res.status(400).json({ ok: false, message: 'key requerido' });
 
-const PORT = process.env.PORT || 10000;
+    const cmd = new GetObjectCommand({ Bucket: S3_BUCKET, Key: key });
+    const url = await getSignedUrl(s3, cmd, { expiresIn: expires });
+
+    res.json({ ok: true, url });
+  } catch (e) {
+    console.error('sign-get error', e);
+    res.status(500).json({ ok: false, message: 'sign-get failed', detail: e?.message });
+  }
+});
+
+// Raíz
+app.get('/', (_req, res) => res.json({ ok: true, name: 'Mixtli backend (e2)', time: new Date().toISOString() }));
+
+// ====== START ======
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log('Mixtli backend fix on :' + PORT);
-  console.log('[Tip] S3_ENDPOINT = hostname e2 SIN /bucket.');
-  console.log('[Tip] S3_FORCE_PATH_STYLE = true (e2).');
+  console.log('Mixtli backend on :' + PORT);
+  console.log('[Tip] iDrive e2 -> S3_FORCE_PATH_STYLE=true, endpoint = hostname sin /bucket');
 });
