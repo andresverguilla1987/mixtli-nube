@@ -13,9 +13,9 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 // ====== ENV (iDrive e2 mapeado a S3_*) ======
-const S3_ENDPOINT = process.env.S3_ENDPOINT;                   // p.ej. https://x3j7.or2.idrivee2-60.com  (SIN /bucket)
-const S3_BUCKET   = process.env.S3_BUCKET;                     // p.ej. 1mixtlinube3
-const S3_REGION   = process.env.S3_REGION || 'us-east-1';      // e2 suele ir con us-east-1
+const S3_ENDPOINT = process.env.S3_ENDPOINT;                  // p.ej. https://x3j7.or2.idrivee2-60.com  (SIN /bucket)
+const S3_BUCKET   = process.env.S3_BUCKET;                    // p.ej. 1mixtlinube3
+const S3_REGION   = process.env.S3_REGION || 'us-east-1';     // e2 suele ir con us-east-1
 const FORCE_PATH_STYLE = String(process.env.S3_FORCE_PATH_STYLE ?? 'true').toLowerCase() !== 'false'; // e2 requiere true
 
 if (!S3_ENDPOINT || !S3_BUCKET) {
@@ -33,7 +33,7 @@ const s3 = new S3Client({
   }
 });
 
-// ====== APP/CORS ======
+// ====== APP / CORS ======
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use(morgan('dev'));
@@ -71,6 +71,13 @@ app.use(cors({
 }));
 app.options('*', cors());
 
+// ====== HELPERS ======
+function safeAlbum(name) {
+  const a = String(name || '').trim() || 'personal';
+  // evita cosas raras en el prefijo
+  return a.replace(/^\.+/,'').replace(/\/{2,}/g,'/').replace(/^\//,'').replace(/\.\./g,'');
+}
+
 // ====== RUTAS ======
 
 // Salud simple: HEAD bucket
@@ -104,16 +111,31 @@ app.get('/api/diag', async (_req, res) => {
   res.json({ ok: true, diag });
 });
 
-// Listar objetos por álbum (prefijo)
+// Listar objetos por álbum (prefijo) con paginación opcional
+// /api/list?album=personal&limit=60&token=XYZ
 app.get(['/api/list', '/api/album/list'], async (req, res) => {
-  const album = String(req.query.album || '').trim() || 'personal';
+  const album = safeAlbum(req.query.album);
   const Prefix = album.endsWith('/') ? album : album + '/';
+  const MaxKeys = Math.min(1000, Math.max(1, parseInt(req.query.limit || '1000', 10)));
+  const ContinuationToken = req.query.token ? String(req.query.token) : undefined;
+
   try {
-    const out = await s3.send(new ListObjectsV2Command({ Bucket: S3_BUCKET, Prefix }));
+    const out = await s3.send(new ListObjectsV2Command({
+      Bucket: S3_BUCKET,
+      Prefix,
+      MaxKeys,
+      ContinuationToken
+    }));
     const items = (out.Contents || []).map(o => ({
       key: o.Key, size: o.Size, etag: o.ETag, lastModified: o.LastModified
     }));
-    res.json({ ok: true, album, items });
+    res.json({
+      ok: true,
+      album,
+      items,
+      isTruncated: !!out.IsTruncated,
+      nextToken: out.NextContinuationToken || null
+    });
   } catch (e) {
     console.error('list error', e);
     res.status(502).json({
@@ -128,7 +150,7 @@ app.post('/api/presign', async (req, res) => {
     const { filename, key, contentType, album } = req.body || {};
     const cleanName = (filename || key || '').toString().trim();
     if (!cleanName) return res.status(400).json({ ok: false, message: 'filename o key requerido' });
-    const folder = (album || 'personal').toString().trim() || 'personal';
+    const folder = safeAlbum(album);
     const Key = (folder.endsWith('/') ? folder : (folder + '/')) + cleanName;
 
     const putCmd = new PutObjectCommand({
@@ -151,7 +173,7 @@ app.post('/api/presign-batch', async (req, res) => {
     if (!Array.isArray(files) || files.length === 0) {
       return res.status(400).json({ ok: false, message: 'files[] requerido' });
     }
-    const folder = (album || 'personal').toString().trim() || 'personal';
+    const folder = safeAlbum(album);
     const results = [];
     for (const f of files) {
       const name = (f?.filename || f?.key || '').toString().trim();
@@ -169,14 +191,19 @@ app.post('/api/presign-batch', async (req, res) => {
   }
 });
 
-// --- firma de lectura para previews/miniaturas ---
+// --- firma de lectura para previews/miniaturas (single) ---
 app.get('/api/sign-get', async (req, res) => {
   try {
     const key = String(req.query.key || '').trim();
     const expires = Math.min(900, Math.max(30, parseInt(req.query.expires || '300', 10)));
     if (!key) return res.status(400).json({ ok: false, message: 'key requerido' });
 
-    const cmd = new GetObjectCommand({ Bucket: S3_BUCKET, Key: key });
+    const cmd = new GetObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      // permite cache mientras viva la URL firmada
+      ResponseCacheControl: 'public,max-age=86400,immutable'
+    });
     const url = await getSignedUrl(s3, cmd, { expiresIn: expires });
 
     res.json({ ok: true, url });
@@ -186,8 +213,36 @@ app.get('/api/sign-get', async (req, res) => {
   }
 });
 
+// --- firma de lectura en batch (mejor rendimiento) ---
+app.post('/api/sign-get-batch', async (req, res) => {
+  try {
+    const keys = Array.isArray(req.body?.keys) ? req.body.keys : [];
+    const expires = Math.min(900, Math.max(30, parseInt(req.body?.expires || '300', 10)));
+    if (!keys.length) return res.status(400).json({ ok: false, message: 'keys[] requerido' });
+
+    const results = await Promise.all(keys.map(async (key) => {
+      try {
+        const cmd = new GetObjectCommand({
+          Bucket: S3_BUCKET,
+          Key: String(key),
+          ResponseCacheControl: 'public,max-age=86400,immutable'
+        });
+        const url = await getSignedUrl(s3, cmd, { expiresIn: expires });
+        return { key, url };
+      } catch (e) {
+        return { key, url: null, error: e?.name || 'err' };
+      }
+    }));
+
+    res.json({ ok: true, results });
+  } catch (e) {
+    console.error('sign-get-batch error', e);
+    res.status(500).json({ ok: false, message: 'sign-get-batch failed', detail: e?.message });
+  }
+});
+
 // Raíz
-app.get('/', (_req, res) => res.json({ ok: true, name: 'Mixtli backend (e2)', time: new Date().toISOString() }));
+app.get('/', (_req, res) => res.json({ ok: true, name: 'Mixtli backend (e2) vLZ', time: new Date().toISOString() }));
 
 // ====== START ======
 const PORT = process.env.PORT || 8080;
