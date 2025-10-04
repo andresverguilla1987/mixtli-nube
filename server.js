@@ -1,8 +1,16 @@
+// server.js — Mixtli backend fix v3 (iDrive e2 listo)
+// Pega TAL CUAL y redeploya en Render.
+
 import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
 import cors from 'cors';
-import { S3Client, ListObjectsV2Command, HeadBucketCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  ListObjectsV2Command,
+  HeadBucketCommand,
+  PutObjectCommand
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 /* ====== ENV esperadas (iDrive e2) ======
@@ -15,15 +23,15 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
    ALLOWED_ORIGINS=https://*.netlify.app,https://mixtli-nube.onrender.com
 ======================================== */
 
-const S3_ENDPOINT = process.env.S3_ENDPOINT;          // host e2 (sin /bucket)
-const S3_BUCKET   = process.env.S3_BUCKET;
-const S3_REGION   = process.env.S3_REGION || 'us-east-1';
+const S3_ENDPOINT = process.env.S3_ENDPOINT;
+const S3_BUCKET = process.env.S3_BUCKET;
+const S3_REGION = process.env.S3_REGION || 'us-east-1';
 const FORCE_PATH_STYLE = String(process.env.S3_FORCE_PATH_STYLE ?? 'true').toLowerCase() !== 'false';
 
 const s3 = new S3Client({
   region: S3_REGION,
-  endpoint: S3_ENDPOINT,
-  forcePathStyle: FORCE_PATH_STYLE, // e2 lo requiere
+  endpoint: S3_ENDPOINT,          // e2: hostname (sin /bucket, sin IP)
+  forcePathStyle: FORCE_PATH_STYLE, // e2 requiere path-style
   credentials: {
     accessKeyId: process.env.S3_ACCESS_KEY_ID,
     secretAccessKey: process.env.S3_SECRET_ACCESS_KEY
@@ -41,7 +49,7 @@ function errInfo(e) {
 
 const app = express();
 
-/* ---------- CORS (comodines soportados) ---------- */
+/* ---------- CORS (soporta comodines) ---------- */
 const allowListRaw = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map(s => s.trim())
@@ -50,8 +58,8 @@ const allowListRaw = (process.env.ALLOWED_ORIGINS || '')
 const allowRegexes = allowListRaw
   .filter(p => p.includes('*'))
   .map(p => new RegExp('^' + p
-    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')  // escapa regex
-    .replace(/\\\*/g, '.*')                 // convierte * a .*
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&') // escapar regex
+    .replace(/\\\*/g, '.*')               // * => .*
   + '$'));
 
 const allowListExact = new Set(allowListRaw.filter(p => !p.includes('*')));
@@ -74,7 +82,7 @@ app.use(cors({
 app.options('*', cors());
 
 /* ---------- Middlewares ---------- */
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '5mb' }));
 app.use(morgan('dev'));
 
 /* ---------- Health & Diagnóstico ---------- */
@@ -89,12 +97,7 @@ app.get(['/salud','/api/health','/healthz'], async (_req, res) => {
 
 app.get('/api/diag', async (_req, res) => {
   const diag = {
-    s3: {
-      endpoint: S3_ENDPOINT,
-      bucket: S3_BUCKET,
-      region: S3_REGION,
-      forcePathStyle: FORCE_PATH_STYLE
-    },
+    s3: { endpoint: S3_ENDPOINT, bucket: S3_BUCKET, region: S3_REGION, forcePathStyle: FORCE_PATH_STYLE },
     allowed_origins: allowListRaw.length ? allowListRaw : '(empty → allow all)'
   };
   try {
@@ -106,7 +109,7 @@ app.get('/api/diag', async (_req, res) => {
   res.json({ ok: true, diag });
 });
 
-/* ---------- Self-test upload (servidor → e2, sin CORS del navegador) ---------- */
+/* ---------- Self-test upload (servidor → e2) ---------- */
 app.post('/api/self-test-upload', async (req, res) => {
   try {
     const album = (req.body?.album || 'personal').toString().trim() || 'personal';
@@ -197,6 +200,6 @@ app.get('/', (_req, res) => res.json({
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('Mixtli backend fix on :' + PORT);
-  console.log('[Tip] S3_ENDPOINT debe ser HOSTNAME e2 (sin /bucket).');
-  console.log('[Tip] S3_FORCE_PATH_STYLE=true para iDrive e2.');
+  console.log('[Tip] S3_ENDPOINT = hostname e2 SIN /bucket.');
+  console.log('[Tip] S3_FORCE_PATH_STYLE = true (e2).');
 });
