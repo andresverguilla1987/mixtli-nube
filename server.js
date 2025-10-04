@@ -5,20 +5,11 @@ import cors from 'cors';
 import { S3Client, ListObjectsV2Command, HeadBucketCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
-// ---- CONFIG ----
-const REQUIRED = ['S3_ENDPOINT','S3_BUCKET','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY'];
-const missing = REQUIRED.filter(k => !process.env[k] || String(process.env[k]).trim()==='');
-if (missing.length) {
-  console.warn('[BOOT] Missing env:', missing.join(', '));
-}
-
-const S3_ENDPOINT = process.env.S3_ENDPOINT; // e.g. https://<accountid>.r2.cloudflarestorage.com
+const S3_ENDPOINT = process.env.S3_ENDPOINT;
 const S3_BUCKET = process.env.S3_BUCKET;
 const S3_REGION = process.env.S3_REGION || 'auto';
 const FORCE_PATH_STYLE = String(process.env.S3_FORCE_PATH_STYLE||'true').toLowerCase()!=='false';
 
-// Important: use HOSTNAME endpoint (no bucket suffix). Do NOT use raw IP.
-// R2 requires SNI; connecting to an IP will fail TLS.
 const s3 = new S3Client({
   region: S3_REGION,
   endpoint: S3_ENDPOINT,
@@ -30,19 +21,37 @@ const s3 = new S3Client({
 });
 
 const app = express();
+const allowListRaw = (process.env.ALLOWED_ORIGINS||'').split(',').map(s=>s.trim()).filter(Boolean);
+
+// Convert wildcard patterns ('*.netlify.app') to regexes
+const allowRegexes = allowListRaw
+  .filter(p => p.includes('*'))
+  .map(p => new RegExp('^' + p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace('\\*', '.*') + '$'));
+
+const allowListExact = new Set(allowListRaw.filter(p => !p.includes('*')));
+
+console.log('[CORS] ALLOWED_ORIGINS raw =', allowListRaw.length ? allowListRaw : '(empty -> allow all)');
+app.use((req, _res, next) => {
+  if (req.headers.origin) {
+    console.log('[CORS] Origin:', req.headers.origin);
+  }
+  next();
+});
 app.use(cors({
   origin: (origin, cb) => {
-    // Simple CORS allow-list using comma-separated env ALLOWED_ORIGINS
-    const allowList = (process.env.ALLOWED_ORIGINS||'').split(',').map(s=>s.trim()).filter(Boolean);
-    if (!origin || allowList.length===0 || allowList.includes(origin)) return cb(null, true);
+    // No origin (e.g., curl) or empty allow-list -> allow
+    if (!origin || allowListRaw.length===0 || allowListRaw.includes('*')) return cb(null, true);
+    if (allowListExact.has(origin)) return cb(null, true);
+    if (allowRegexes.some(rx => rx.test(origin))) return cb(null, true);
     return cb(new Error('CORS not allowed for '+origin));
   },
   credentials: false
 }));
+app.options('*', cors());
+
 app.use(express.json({limit: '2mb'}));
 app.use(morgan('dev'));
 
-// ---- HEALTH ----
 app.get(['/salud','/api/health','/healthz'], async (req,res) => {
   try {
     await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }));
@@ -52,7 +61,6 @@ app.get(['/salud','/api/health','/healthz'], async (req,res) => {
   }
 });
 
-// ---- LIST ----
 app.get(['/api/list','/api/album/list'], async (req, res) => {
   const album = String(req.query.album || '').trim() || 'personal';
   const Prefix = album.endsWith('/') ? album : album + '/';
@@ -71,13 +79,11 @@ app.get(['/api/list','/api/album/list'], async (req, res) => {
   }
 });
 
-// ---- PRESIGN (single) ----
 app.post('/api/presign', async (req, res) => {
   try {
     const { filename, key, contentType, album } = req.body || {};
     const cleanName = (filename||key||'').toString().trim();
     if (!cleanName) {
-      // Match prior logs: "filename o key requerido"
       return res.status(400).json({ ok:false, message:'filename o key requerido' });
     }
     const folder = (album||'personal').toString().trim() || 'personal';
@@ -87,7 +93,7 @@ app.post('/api/presign', async (req, res) => {
       Key,
       ContentType: contentType || 'application/octet-stream'
     });
-    const url = await getSignedUrl(s3, putCmd, { expiresIn: 60*5 }); // 5 min
+    const url = await getSignedUrl(s3, putCmd, { expiresIn: 60*5 });
     res.json({ ok:true, url, key: Key, expiresIn: 300 });
   } catch (e) {
     console.error('presign error', e);
@@ -95,7 +101,6 @@ app.post('/api/presign', async (req, res) => {
   }
 });
 
-// ---- PRESIGN BATCH (optional) ----
 app.post('/api/presign-batch', async (req, res) => {
   try {
     const { files, album } = req.body || {};
@@ -123,11 +128,11 @@ app.post('/api/presign-batch', async (req, res) => {
   }
 });
 
-// ---- ROOT ----
-app.get('/', (req,res)=>res.json({ ok:true, name:'Mixtli backend fix', time:new Date().toISOString() }));
+app.get('/', (req,res)=>res.json({ ok:true, name:'Mixtli backend fix v2', time:new Date().toISOString() }));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, ()=>{
   console.log('Mixtli backend fix on :'+PORT);
+  console.log('[Tip] ALLOWED_ORIGINS supports wildcards, e.g. https://*.netlify.app');
   console.log('[Tip] Ensure S3_ENDPOINT is a HOSTNAME (no bucket, no IP). Example: https://<accountid>.r2.cloudflarestorage.com');
 });
