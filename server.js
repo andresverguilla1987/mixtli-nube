@@ -1,4 +1,4 @@
-// server.js (Mixtli backend e2 – fast, batch, delete, keep-alive)
+// server.js (Mixtli backend e2 – fast, albums, move, batch, delete, keep-alive)
 import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
@@ -14,17 +14,17 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
-  DeleteObjectsCommand
+  DeleteObjectsCommand,
+  CopyObjectCommand
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 // ====== ENV (iDrive e2 mapeado a S3_*) ======
-const S3_ENDPOINT = process.env.S3_ENDPOINT;             // p.ej. https://x3j7.or2.idrivee2-60.com (SIN /bucket)
-const S3_BUCKET   = process.env.S3_BUCKET;               // p.ej. 1mixtlinube3
+const S3_ENDPOINT = process.env.S3_ENDPOINT;             // ej. https://x3j7.or2.idrivee2-60.com  (SIN /bucket)
+const S3_BUCKET   = process.env.S3_BUCKET;               // ej. 1mixtlinube3
 const S3_REGION   = process.env.S3_REGION || 'us-east-1';
-const FORCE_PATH_STYLE = String(process.env.S3_FORCE_PATH_STYLE ?? 'true')
-  .toLowerCase() !== 'false';                            // e2 => true
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';       // opcional: proteger delete-batch
+const FORCE_PATH_STYLE = String(process.env.S3_FORCE_PATH_STYLE ?? 'true').toLowerCase() !== 'false'; // e2 => true
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';       // para /delete-batch (opcional pero recomendado)
 
 if (!S3_ENDPOINT || !S3_BUCKET) {
   console.warn('[WARN] Faltan S3_ENDPOINT y/o S3_BUCKET');
@@ -36,14 +36,14 @@ const httpsAgent = new HttpsAgent({
   keepAliveMsecs: 10_000,
   maxSockets: 100,
   maxFreeSockets: 20,
-  timeout: 20_000,          // socket timeout
-  freeSocketTimeout: 15_000 // ms que se mantiene el socket ocioso
+  timeout: 20_000,           // socket timeout
+  freeSocketTimeout: 15_000
 });
 
 const requestHandler = new NodeHttpHandler({
   httpsAgent,
-  connectionTimeout: 2_000, // ms para establecer conexión
-  socketTimeout: 20_000     // ms de inactividad por request
+  connectionTimeout: 2_000,
+  socketTimeout: 20_000
 });
 
 // ====== S3 CLIENT (e2) ======
@@ -68,7 +68,7 @@ app.use(compression());
 app.use(express.json({ limit: '2mb' }));
 app.use(morgan('dev'));
 
-// ALLOWED_ORIGINS puede venir como JSON '["https://foo","https://*.netlify.app"]' o CSV:
+// ALLOWED_ORIGINS puede venir como JSON '["https://foo","https://*.netlify.app"]' o CSV
 function parseAllowedOrigins(src) {
   if (!src) return [];
   const t = src.trim();
@@ -91,7 +91,6 @@ app.use(cors({
     return cb(new Error('CORS not allowed for ' + origin));
   }
 }));
-// Preflight global
 app.options('*', cors());
 
 // ====== HELPERS ======
@@ -102,6 +101,10 @@ function safeAlbum(name) {
 function cacheShort(res) {
   res.set('Cache-Control', 'public, max-age=30'); // micro-cache para list/presign json
 }
+function encodeCopySourceKey(key) {
+  // Para CopySource: NO codificar slashes
+  return encodeURIComponent(key).replace(/%2F/g, '/');
+}
 
 // ====== RUTAS ======
 
@@ -111,63 +114,98 @@ app.get(['/salud', '/api/health', '/healthz'], async (_req, res) => {
     await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }));
     res.json({ ok: true, storage: 'up', bucket: S3_BUCKET });
   } catch (e) {
-    res.status(200).json({
-      ok: true, storage: 'down', bucket: S3_BUCKET,
-      error: e?.name || 'unknown', detail: e?.message
-    });
+    res.status(200).json({ ok: true, storage: 'down', bucket: S3_BUCKET, error: e?.name || 'unknown', detail: e?.message });
   }
 });
 
 // Diagnóstico
 app.get('/api/diag', async (_req, res) => {
-  const diag = {
-    s3: { endpoint: S3_ENDPOINT, bucket: S3_BUCKET, region: S3_REGION, forcePathStyle: FORCE_PATH_STYLE },
-    allowed_origins: allowListRaw
-  };
-  try {
-    await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }));
-    diag.headBucket = { ok: true };
-  } catch (e) {
-    diag.headBucket = {
-      ok: false,
-      error: { name: e?.name || 'unknown', message: e?.message, http: e?.$metadata?.httpStatusCode }
-    };
-  }
-  cacheShort(res);
-  res.json({ ok: true, diag });
+  const diag = { s3: { endpoint: S3_ENDPOINT, bucket: S3_BUCKET, region: S3_REGION, forcePathStyle: FORCE_PATH_STYLE }, allowed_origins: allowListRaw };
+  try { await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET })); diag.headBucket = { ok: true }; }
+  catch (e) { diag.headBucket = { ok: false, error: { name: e?.name || 'unknown', message: e?.message, http: e?.$metadata?.httpStatusCode } }; }
+  cacheShort(res); res.json({ ok: true, diag });
 });
 
-// Listar (paginado)  /api/list?album=personal&limit=500&token=XYZ
+// ====== ÁLBUMES ======
+
+// Lista álbumes por "carpetas raíz" usando Delimiter="/"
+app.get('/api/albums', async (_req, res) => {
+  try {
+    const out = await s3.send(new ListObjectsV2Command({
+      Bucket: S3_BUCKET,
+      Prefix: '',
+      Delimiter: '/'
+    }));
+    const albums = (out.CommonPrefixes || [])
+      .map(p => (p.Prefix || '').replace(/\/$/, ''))
+      .filter(Boolean);
+    res.json({ ok: true, albums });
+  } catch (e) {
+    // Fallback si e2 no devolviera CommonPrefixes
+    res.json({ ok: true, albums: ['personal'] });
+  }
+});
+
+// Crea álbum (sube .keep para "materializar" la carpeta)
+app.post('/api/album/create', async (req, res) => {
+  try {
+    const album = safeAlbum(req.body?.album);
+    if (!album) return res.status(400).json({ ok:false, message:'album requerido' });
+    const Key = album.endsWith('/') ? album + '.keep' : (album + '/.keep');
+    await s3.send(new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key,
+      Body: new Uint8Array(),
+      ContentType: 'text/plain'
+    }));
+    res.json({ ok:true, album });
+  } catch (e) {
+    res.status(500).json({ ok:false, message:'album-create failed', detail:e?.message });
+  }
+});
+
+// Mover objeto a otro álbum (Copy + Delete)
+app.post('/api/move', async (req, res) => {
+  try {
+    const fromKey = String(req.body?.fromKey || '').trim();
+    const toAlbum = safeAlbum(req.body?.toAlbum);
+    if (!fromKey || !toAlbum) return res.status(400).json({ ok:false, message:'fromKey y toAlbum requeridos' });
+
+    const baseName = fromKey.split('/').pop();
+    const toKey = (toAlbum.endsWith('/') ? toAlbum : toAlbum + '/') + baseName;
+
+    await s3.send(new CopyObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: toKey,
+      CopySource: `${S3_BUCKET}/${encodeCopySourceKey(fromKey)}`
+    }));
+    await s3.send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: fromKey }));
+    res.json({ ok:true, moved: { fromKey, toKey } });
+  } catch (e) {
+    res.status(500).json({ ok:false, message:'move failed', detail:e?.message });
+  }
+});
+
+// ====== LISTAR OBJETOS ======
+// /api/list?album=personal&limit=1000&token=XYZ
 app.get(['/api/list', '/api/album/list'], async (req, res) => {
   const album = safeAlbum(req.query.album);
   const Prefix = album.endsWith('/') ? album : album + '/';
   const MaxKeys = Math.min(1000, Math.max(1, parseInt(req.query.limit || '1000', 10)));
   const ContinuationToken = req.query.token ? String(req.query.token) : undefined;
-
   try {
-    const out = await s3.send(new ListObjectsV2Command({
-      Bucket: S3_BUCKET, Prefix, MaxKeys, ContinuationToken
-    }));
-    const items = (out.Contents || []).map(o => ({
-      key: o.Key, size: o.Size, etag: o.ETag, lastModified: o.LastModified
-    }));
+    const out = await s3.send(new ListObjectsV2Command({ Bucket: S3_BUCKET, Prefix, MaxKeys, ContinuationToken }));
+    const items = (out.Contents || []).map(o => ({ key: o.Key, size: o.Size, etag: o.ETag, lastModified: o.LastModified }));
     cacheShort(res);
-    res.json({
-      ok: true,
-      album,
-      items,
-      isTruncated: !!out.IsTruncated,
-      nextToken: out.NextContinuationToken || null
-    });
+    res.json({ ok: true, album, items, isTruncated: !!out.IsTruncated, nextToken: out.NextContinuationToken || null });
   } catch (e) {
     console.error('list error', e);
-    res.status(502).json({
-      ok: false, code: 'STORAGE_DOWN', message: 'Error consultando almacenamiento', detail: e?.message
-    });
+    res.status(502).json({ ok: false, code: 'STORAGE_DOWN', message: 'Error consultando almacenamiento', detail: e?.message });
   }
 });
 
-// Pre-firma subida (single)
+// ====== SUBIDA (PREFIRMA) ======
+// Single
 app.post('/api/presign', async (req, res) => {
   try {
     const { filename, key, contentType, album } = req.body || {};
@@ -175,28 +213,20 @@ app.post('/api/presign', async (req, res) => {
     if (!cleanName) return res.status(400).json({ ok: false, message: 'filename o key requerido' });
     const folder = safeAlbum(album);
     const Key = (folder.endsWith('/') ? folder : (folder + '/')) + cleanName;
-
-    const putCmd = new PutObjectCommand({
-      Bucket: S3_BUCKET,
-      Key,
-      ContentType: contentType || 'application/octet-stream'
-    });
+    const putCmd = new PutObjectCommand({ Bucket: S3_BUCKET, Key, ContentType: contentType || 'application/octet-stream' });
     const url = await getSignedUrl(s3, putCmd, { expiresIn: 60 * 5 });
-    cacheShort(res);
-    res.json({ ok: true, url, key: Key, expiresIn: 300 });
+    cacheShort(res); res.json({ ok: true, url, key: Key, expiresIn: 300 });
   } catch (e) {
     console.error('presign error', e);
     res.status(500).json({ ok: false, message: 'No se pudo presignar', detail: e?.message });
   }
 });
 
-// Pre-firma subida (batch)
+// Batch
 app.post('/api/presign-batch', async (req, res) => {
   try {
     const { files, album } = req.body || {};
-    if (!Array.isArray(files) || files.length === 0) {
-      return res.status(400).json({ ok: false, message: 'files[] requerido' });
-    }
+    if (!Array.isArray(files) || files.length === 0) return res.status(400).json({ ok: false, message: 'files[] requerido' });
     const folder = safeAlbum(album);
     const results = [];
     for (const f of files) {
@@ -208,85 +238,53 @@ app.post('/api/presign-batch', async (req, res) => {
       const url = await getSignedUrl(s3, putCmd, { expiresIn: 60 * 5 });
       results.push({ ok: true, url, key: Key, expiresIn: 300 });
     }
-    cacheShort(res);
-    res.json({ ok: true, results });
+    cacheShort(res); res.json({ ok: true, results });
   } catch (e) {
     console.error('presign-batch error', e);
     res.status(500).json({ ok: false, message: 'No se pudo presignar batch', detail: e?.message });
   }
 });
 
-// Firma de lectura (single)
+// ====== LECTURA (PREFIRMA) ======
+// Single
 app.get('/api/sign-get', async (req, res) => {
   try {
     const key = String(req.query.key || '').trim();
     const expires = Math.min(900, Math.max(30, parseInt(req.query.expires || '300', 10)));
     if (!key) return res.status(400).json({ ok: false, message: 'key requerido' });
-
-    const cmd = new GetObjectCommand({
-      Bucket: S3_BUCKET,
-      Key: key,
-      ResponseCacheControl: 'public,max-age=86400,immutable'
-    });
+    const cmd = new GetObjectCommand({ Bucket: S3_BUCKET, Key: key, ResponseCacheControl: 'public,max-age=86400,immutable' });
     const url = await getSignedUrl(s3, cmd, { expiresIn: expires });
-
-    cacheShort(res);
-    res.json({ ok: true, url });
+    cacheShort(res); res.json({ ok: true, url });
   } catch (e) {
     console.error('sign-get error', e);
     res.status(500).json({ ok: false, message: 'sign-get failed', detail: e?.message });
   }
 });
 
-// Firma de lectura (batch)
+// Batch
 app.post('/api/sign-get-batch', async (req, res) => {
   try {
     const keys = Array.isArray(req.body?.keys) ? req.body.keys : [];
     const expires = Math.min(900, Math.max(30, parseInt(req.body?.expires || '300', 10)));
     if (!keys.length) return res.status(400).json({ ok: false, message: 'keys[] requerido' });
-
     const results = await Promise.all(keys.map(async (key) => {
       try {
-        const cmd = new GetObjectCommand({
-          Bucket: S3_BUCKET,
-          Key: String(key),
-          ResponseCacheControl: 'public,max-age=86400,immutable'
-        });
+        const cmd = new GetObjectCommand({ Bucket: S3_BUCKET, Key: String(key), ResponseCacheControl: 'public,max-age=86400,immutable' });
         const url = await getSignedUrl(s3, cmd, { expiresIn: expires });
         return { key, url };
       } catch (e) {
         return { key, url: null, error: e?.name || 'err' };
       }
     }));
-
-    cacheShort(res);
-    res.json({ ok: true, results });
+    cacheShort(res); res.json({ ok: true, results });
   } catch (e) {
     console.error('sign-get-batch error', e);
     res.status(500).json({ ok: false, message: 'sign-get-batch failed', detail: e?.message });
   }
 });
 
-// --- borrar objeto (compat con UI) ---
-// Preflight para navegadores
-app.options('/api/object', cors());
-
-app.delete('/api/object', async (req, res) => {
-  try {
-    // Acepta ?key=... o body { key: ... }
-    const key = String(req.query.key || req.body?.key || '').trim();
-    if (!key) {
-      return res.status(400).json({ ok: false, message: 'key requerido' });
-    }
-    await s3.send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: key }));
-    res.json({ ok: true, deleted: true, key });
-  } catch (e) {
-    console.error('delete error', e);
-    res.status(502).json({ ok:false, message:'No se pudo eliminar', detail: e?.message });
-  }
-});
-
-// Eliminar un objeto (POST alternativo)
+// ====== BORRADO ======
+// Un objeto
 app.post('/api/delete', async (req, res) => {
   try {
     const key = String(req.body?.key || '').trim();
@@ -299,7 +297,7 @@ app.post('/api/delete', async (req, res) => {
   }
 });
 
-// Eliminar varios (protección opcional con token)
+// Lote (con token opcional)
 app.post('/api/delete-batch', async (req, res) => {
   if (ADMIN_TOKEN) {
     const tok = req.get('X-Admin-Token') || '';
@@ -308,20 +306,9 @@ app.post('/api/delete-batch', async (req, res) => {
   try {
     const keys = Array.isArray(req.body?.keys) ? req.body.keys.filter(Boolean) : [];
     if (!keys.length) return res.status(400).json({ ok:false, message:'keys[] requerido' });
-
     const Objects = keys.map(Key => ({ Key: String(Key) }));
-    const out = await s3.send(new DeleteObjectsCommand({
-      Bucket: S3_BUCKET,
-      Delete: { Objects, Quiet: true }
-    }));
-
-    res.json({
-      ok:true,
-      results: [{
-        deleted: (out?.Deleted || []).map(d => d.Key),
-        errors: out?.Errors || []
-      }]
-    });
+    const out = await s3.send(new DeleteObjectsCommand({ Bucket: S3_BUCKET, Delete: { Objects, Quiet: true } }));
+    res.json({ ok:true, results:[{ deleted:(out?.Deleted||[]).map(d=>d.Key), errors: out?.Errors||[] }] });
   } catch (e) {
     console.error('delete-batch error', e);
     res.status(500).json({ ok:false, message:'delete-batch failed', detail:e?.message });
@@ -329,7 +316,7 @@ app.post('/api/delete-batch', async (req, res) => {
 });
 
 // Raíz
-app.get('/', (_req, res) => res.json({ ok: true, name: 'Mixtli backend (e2) fast', time: new Date().toISOString() }));
+app.get('/', (_req, res) => res.json({ ok: true, name: 'Mixtli backend (e2) fast+albums', time: new Date().toISOString() }));
 
 // ====== START ======
 const PORT = process.env.PORT || 8080;
