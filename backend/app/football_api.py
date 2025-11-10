@@ -33,8 +33,7 @@ def get_competition_teams(competition_id):
     return r.json()
 
 def get_team_matches(team_id, limit=10):
-    # team matches endpoint with status=SCHEDULED,FINISHED
-    url = f"{BASE_URL}/teams/{team_id}/matches?limit={limit}"
+    url = f"{BASE_URL}/teams/{team_id}/matches?status=FINISHED&limit={limit}"
     r = requests.get(url, headers=headers, timeout=10)
     r.raise_for_status()
     return r.json()

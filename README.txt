@@ -1,22 +1,22 @@
-Quiniela — Advanced (Match details + teams)
+Quiniela — Refined predictions (per-team stats + predicted winner)
 
-Two zips available:
-- quiniela_github_full.zip : Full repo (backend + frontend) ready for GitHub/Render
-- quiniela_netlify_frontend.zip : Frontend-only static site for Netlify (upload the contents)
-
-Backend:
-- Uses FOOTBALL_DATA_KEY environment variable (X-Auth-Token header)
-- Endpoints: /leagues, /league/{id}/matches, /league/{id}/teams, /team/{id}/recent, /match/{id}, /competition/{id}/standings, /predict
-- Start command (Render): pip install -r backend/requirements.txt && web: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+What's new:
+- Endpoint GET /match/{match_id}/predict returns:
+  - home_stats and away_stats (recent form, avg GF/GA)
+  - expected_goals for both teams (model combines ELO-like base + form + goals)
+  - probabilities (home_pct, draw_pct, away_pct)
+  - predicted_winner (string)
 
 Frontend:
-- index.html + styles.css + forebet-main.js
-- Modal view shows match details, recent matches per team, and basic head-to-head aggregated locally
-- If backend not available, frontend falls back to local JSON files (leagues.json, matches.json, teams.json)
+- Shows predicted winner inline in matches list and per-team stats summary
+- Modal shows detailed per-team stats and prediction breakdown
 
-Security:
-- Do NOT commit FOOTBALL_DATA_KEY; use Render environment vars.
+Deploy:
+- Add FOOTBALL_DATA_KEY env var in Render
+- Build: pip install -r backend/requirements.txt
+- Start (Procfile): web: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
-Deployment notes:
-- GitHub repo zip contains everything (backend + frontend). Deploy backend to Render, frontend can be served from same host or Netlify (set up proxy/_redirects to point to backend endpoints).
+Notes:
+- This is a prototype model (heuristic+simulation). For production, we'll replace with trained model (XGBoost/LightGBM) and caching.
+- Avoid heavy polling to football-data to respect rate limits; add caching (Redis) if needed.
 
