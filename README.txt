@@ -1,25 +1,22 @@
-Quiniela - Football-Data.org integration (FastAPI backend + static frontend)
+Quiniela — Advanced (Match details + teams)
 
-INCLUDES:
-- backend/requirements.txt
-- backend/app/main.py (FastAPI endpoints)
-- backend/app/football_api.py (wrapper calls to football-data.org; reads FOOTBALL_DATA_KEY env var)
-- frontend/index.html, styles.css, forebet-main.js (static UI)
-- leagues.json, matches.json, teams.json (fallback data)
-- Procfile (start command for Render)
+Two zips available:
+- quiniela_github_full.zip : Full repo (backend + frontend) ready for GitHub/Render
+- quiniela_netlify_frontend.zip : Frontend-only static site for Netlify (upload the contents)
 
-SETUP (Render):
-1. Create a new Web Service in Render and point to this repo or upload this project.
-2. Add Environment Variable: FOOTBALL_DATA_KEY = <your api.football-data token>
-3. Build command: pip install -r backend/requirements.txt
-4. Start command: (Procfile used) web: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
-5. Deploy. Frontend assumes same origin; if hosting frontend separately, proxy endpoints or adjust CORS.
+Backend:
+- Uses FOOTBALL_DATA_KEY environment variable (X-Auth-Token header)
+- Endpoints: /leagues, /league/{id}/matches, /league/{id}/teams, /team/{id}/recent, /match/{id}, /competition/{id}/standings, /predict
+- Start command (Render): pip install -r backend/requirements.txt && web: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
-ENDPOINTS:
-- GET /health
-- GET /leagues
-- GET /league/{id}/matches
-- GET /league/{id}/teams
-- GET /predict?home=TeamA&away=TeamB  (simple demo predictor)
+Frontend:
+- index.html + styles.css + forebet-main.js
+- Modal view shows match details, recent matches per team, and basic head-to-head aggregated locally
+- If backend not available, frontend falls back to local JSON files (leagues.json, matches.json, teams.json)
 
-Do NOT commit your FOOTBALL_DATA_KEY. Use environment variables.
+Security:
+- Do NOT commit FOOTBALL_DATA_KEY; use Render environment vars.
+
+Deployment notes:
+- GitHub repo zip contains everything (backend + frontend). Deploy backend to Render, frontend can be served from same host or Netlify (set up proxy/_redirects to point to backend endpoints).
+

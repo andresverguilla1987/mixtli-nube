@@ -1,24 +1,30 @@
 {
   "2021": [
     {
+      "id": 1001,
       "date": "2025-11-12T18:00:00Z",
       "home_team": "Arsenal",
       "away_team": "Liverpool",
-      "id": 1001
+      "home_team_id": 1,
+      "away_team_id": 2
     },
     {
+      "id": 1002,
       "date": "2025-11-15T18:00:00Z",
       "home_team": "Manchester City",
       "away_team": "Chelsea",
-      "id": 1002
+      "home_team_id": 3,
+      "away_team_id": 4
     }
   ],
   "2014": [
     {
+      "id": 2001,
       "date": "2025-11-13T20:00:00Z",
       "home_team": "Real Madrid",
       "away_team": "Barcelona",
-      "id": 2001
+      "home_team_id": 10,
+      "away_team_id": 11
     }
   ]
 }

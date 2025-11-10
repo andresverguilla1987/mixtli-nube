@@ -1,13 +1,30 @@
 {
   "2021": [
-    "Arsenal",
-    "Manchester City",
-    "Liverpool",
-    "Chelsea"
+    {
+      "id": 1,
+      "name": "Arsenal"
+    },
+    {
+      "id": 2,
+      "name": "Liverpool"
+    },
+    {
+      "id": 3,
+      "name": "Manchester City"
+    },
+    {
+      "id": 4,
+      "name": "Chelsea"
+    }
   ],
   "2014": [
-    "Real Madrid",
-    "Barcelona",
-    "Atletico Madrid"
+    {
+      "id": 10,
+      "name": "Real Madrid"
+    },
+    {
+      "id": 11,
+      "name": "Barcelona"
+    }
   ]
 }

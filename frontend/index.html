@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Quiniela — Ligas & Detalles</title><link rel="stylesheet" href="/styles.css"/></head><body>
+<div class="container">
+  <header class="header"><div class="logo"><h1>Quiniela</h1><div class="small">Predicciones con estadísticas — solo fútbol</div></div>
+    <div class="controls card"><div class="league-selector"><label class="small">Liga</label><select id="league-select"></select></div><div style="margin-left:8px"><button id="btn-refresh">Actualizar</button></div></div></header>
+  <main class="grid">
+    <section>
+      <div class="card">
+        <div class="table-header"><div style="width:140px">Fecha</div><div>Partido</div><div style="width:100px">Prob</div></div>
+        <div id="matches-list"></div>
+      </div>
+    </section>
+    <aside class="side">
+      <div class="card top-picks"><h3 class="small">Top Picks</h3><div id="top-picks-list"></div></div>
+      <div class="card" style="margin-top:12px"><h4 class="small">Equipos</h4><ul id="teams-list" class="small"></ul></div>
+    </aside>
+  </main>
+</div>
+
+<!-- Modal -->
+<div id="modal" class="modal hidden"><div class="modal-content card"><button id="modal-close" class="small">Cerrar</button><div id="modal-body"></div></div></div>
+
+<script src="/forebet-main.js"></script>
+</body></html>

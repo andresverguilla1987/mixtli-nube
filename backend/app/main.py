@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import football_api
 import os, random
 
-app = FastAPI(title="Quiniela - Football-Data Integration")
+app = FastAPI(title="Quiniela - Football-Data Advanced")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,7 +39,9 @@ def league_matches(competition_id: int):
                 "utcDate": m.get("utcDate"),
                 "date": m.get("utcDate"),
                 "home_team": m.get("homeTeam",{}).get("name"),
+                "home_team_id": m.get("homeTeam",{}).get("id"),
                 "away_team": m.get("awayTeam",{}).get("name"),
+                "away_team_id": m.get("awayTeam",{}).get("id"),
                 "status": m.get("status"),
                 "competition": m.get("competition", {}).get("name") if m.get("competition") else None
             })
@@ -50,16 +52,47 @@ def league_matches(competition_id: int):
 @app.get("/league/{competition_id}/teams")
 def league_teams(competition_id: int):
     try:
-        import requests
-        url = f"https://api.football-data.org/v4/competitions/{competition_id}/teams"
-        headers = {}
-        if os.getenv('FOOTBALL_DATA_KEY'):
-            headers = {"X-Auth-Token": os.getenv('FOOTBALL_DATA_KEY')}
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        teams = [t.get('name') for t in data.get('teams', [])]
-        return teams
+        data = football_api.get_competition_teams(competition_id)
+        teams = data.get('teams', [])
+        simplified = [{"id":t.get("id"), "name": t.get("name"), "shortName": t.get("shortName")} for t in teams]
+        return simplified
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+@app.get("/team/{team_id}/recent")
+def team_recent(team_id: int, limit: int = 5):
+    try:
+        data = football_api.get_team_matches(team_id, limit=limit)
+        matches = data.get('matches', [])
+        # return simplified recent results
+        out = []
+        for m in matches:
+            out.append({
+                "id": m.get("id"),
+                "date": m.get("utcDate"),
+                "competition": m.get("competition", {}).get("name") if m.get("competition") else None,
+                "homeTeam": m.get("homeTeam", {}).get("name"),
+                "awayTeam": m.get("awayTeam", {}).get("name"),
+                "score": m.get("score")
+            })
+        return out
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+@app.get("/match/{match_id}")
+def match_detail(match_id: int):
+    try:
+        data = football_api.get_match(match_id)
+        m = data.get("match", data)
+        return m
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+@app.get("/competition/{competition_id}/standings")
+def competition_standings(competition_id: int):
+    try:
+        data = football_api.get_standings(competition_id)
+        return data
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -77,9 +110,8 @@ def predict(home: str = Query(...), away: str = Query(...)):
         exp_away_goals = max(0.1, exp_away_goals)
         sims = 2000
         home_wins = draw = away_wins = 0
-        import math, random
+        import random
         for _ in range(sims):
-            # simple Poisson via expovariate approximation for demo
             gh = int(random.expovariate(1.0/exp_home_goals))
             ga = int(random.expovariate(1.0/exp_away_goals))
             if gh>ga: home_wins+=1
