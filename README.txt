@@ -1,31 +1,25 @@
+Quiniela - Football-Data.org integration (FastAPI backend + static frontend)
 
-Mixtli Backend (Render) – iDrive e2 FAST (vLZ-fast)
+INCLUDES:
+- backend/requirements.txt
+- backend/app/main.py (FastAPI endpoints)
+- backend/app/football_api.py (wrapper calls to football-data.org; reads FOOTBALL_DATA_KEY env var)
+- frontend/index.html, styles.css, forebet-main.js (static UI)
+- leagues.json, matches.json, teams.json (fallback data)
+- Procfile (start command for Render)
 
-Mejoras de rendimiento incluidas:
-- HTTP keep-alive + pool (https.Agent) y NodeHttpHandler (menos latencia / más concurrencia)
-- CORS preflight cacheado (maxAge=86400)
-- Cache hints en sign-get y sign-get-batch (respuesta JSON)
-- CacheControl en PUT para tipos multimedia (mejor CDN/browser cache)
+SETUP (Render):
+1. Create a new Web Service in Render and point to this repo or upload this project.
+2. Add Environment Variable: FOOTBALL_DATA_KEY = <your api.football-data token>
+3. Build command: pip install -r backend/requirements.txt
+4. Start command: (Procfile used) web: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+5. Deploy. Frontend assumes same origin; if hosting frontend separately, proxy endpoints or adjust CORS.
 
-ENV en Render:
-  S3_ENDPOINT=https://<tu-subdominio>.or2.idrivee2-60.com
-  S3_BUCKET=1mixtlinube3
-  S3_REGION=us-east-1
-  S3_FORCE_PATH_STYLE=true
-  S3_ACCESS_KEY_ID=****************
-  S3_SECRET_ACCESS_KEY=****************
-  ALLOWED_ORIGINS=["https://flourishing-salmiakki-c9b2e2.netlify.app","https://mixtli-nube.onrender.com"]
+ENDPOINTS:
+- GET /health
+- GET /leagues
+- GET /league/{id}/matches
+- GET /league/{id}/teams
+- GET /predict?home=TeamA&away=TeamB  (simple demo predictor)
 
-Start command:
-  npm start
-
-Endpoints:
-  GET  /salud | /api/health
-  GET  /api/diag
-  GET  /api/list?album=personal&limit=60&token=...
-  POST /api/presign
-  POST /api/presign-batch
-  GET  /api/sign-get?key=...
-  POST /api/sign-get-batch   { keys:[...], expires:300 }
-
-Listo para desplegar en Render.
+Do NOT commit your FOOTBALL_DATA_KEY. Use environment variables.
